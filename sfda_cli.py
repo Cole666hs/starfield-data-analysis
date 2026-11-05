@@ -204,7 +204,7 @@ def cmd_save_diff(args) -> int:
 def _load_pe(path: str):
     from ssb_i.ssb_pe_lib import PE, PEIntegrityError
 
-    src = _require_file(path, "Binärdatei")
+    src = _require_file(path, "binary")
     try:
         return PE(src)
     except PEIntegrityError as exc:
@@ -270,11 +270,11 @@ def cmd_pe_sections(args) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog=CLI_PROG,
-        description=(f"{PRODUCT_NAME} — {PRODUCT_SUBTITLE}. "
+        description=(f"{PRODUCT_NAME} - {PRODUCT_SUBTITLE}. "
                  f"{DEVELOPER}. All operations are read-only."),
     )
     parser.add_argument("--version", action="version",
-                        version=f"{CLI_PROG} {VERSION} — {PRODUCT_NAME} ({DEVELOPER})")
+                        version=f"{CLI_PROG} {VERSION} - {PRODUCT_NAME} ({DEVELOPER})")
     parser.add_argument("--json", action="store_true",
                         help="machine-readable JSON output on stdout")
     sub = parser.add_subparsers(dest="group", required=True)

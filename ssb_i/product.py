@@ -33,7 +33,8 @@ LICENSE_NAME = "MIT"
 
 def version_string() -> str:
     """One-line version message shared by CLI and GUI."""
-    return f"{CLI_PROG} {VERSION} — {PRODUCT_NAME} ({DEVELOPER})"
+    # ASCII only: the Windows console (cp850/cp1252) has no em dash.
+    return f"{CLI_PROG} {VERSION} - {PRODUCT_NAME} ({DEVELOPER})"
 
 
 def full_title() -> str:
