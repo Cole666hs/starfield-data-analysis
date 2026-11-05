@@ -1,0 +1,11 @@
+# Build environments and artifacts
+.venv-build/
+build/
+dist/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# OS noise
+.DS_Store
+Thumbs.db

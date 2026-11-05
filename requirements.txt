@@ -1,0 +1,15 @@
+# Starfield Data Analysis 1.0.0 — runtime and build dependencies
+# Verified combination (05.11.2026, Python 3.13/3.14, Linux and Windows)
+PySide6==6.11.2
+QDarkStyle==3.2.3
+
+# Build only (not needed to run the released package):
+# PyInstaller==6.22.2
+
+# Optional: disassembly for the call-boundary check in ssb_i/ssb_pe_lib.py.
+# Without capstone every inspection command still works; only
+# PE.verify_call_boundaries() reports "capstone_or_section_unavailable".
+# capstone==5.0.7
+
+# The command line (sfda_cli.py) and all parsers in ssb_i/ use the Python
+# standard library only (argparse, json, struct, zlib, hashlib, pathlib, bisect).
