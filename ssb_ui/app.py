@@ -403,7 +403,39 @@ def self_test(save: str, out_path: str | None = None) -> int:
     return finish(0 if ok else 1)
 
 
+def dump_pages(out_path: str | None = None) -> int:
+    """Listet die ausgelieferten Seiten — für Support und Abnahme im Paket.
+
+    Auch in der gefrorenen Anwendung nutzbar, ohne dass ein Fenster aufgeht:
+        StarfieldDataAnalysis --dump-pages [--out pages.txt]
+    """
+    app = QApplication.instance() or QApplication([])
+    win = SSBWorkbench()
+    lines = [f"{APP_NAME} {PRODUCT_VERSION} ({_DEVELOPER})",
+             f"pages: {win.pages.count()}"]
+    for index in range(win.sidebar.count()):
+        label = win.sidebar.item(index).text().strip()
+        widget = type(win.pages.widget(index)).__name__
+        lines.append(f"  {index}: {label}  [{widget}]")
+    for line in lines:
+        if sys.stdout is not None:
+            print(line, flush=True)
+    if out_path:
+        try:
+            Path(out_path).write_text("\n".join(lines) + "\n", encoding="utf-8")
+        except OSError:
+            return 1
+    return 0
+
+
 def main() -> int:
+    if len(sys.argv) >= 2 and sys.argv[1] == "--dump-pages":
+        out_path = None
+        if "--out" in sys.argv:
+            idx = sys.argv.index("--out")
+            if idx + 1 < len(sys.argv):
+                out_path = sys.argv[idx + 1]
+        return dump_pages(out_path)
     if len(sys.argv) >= 2 and sys.argv[1] == "--self-test":
         if len(sys.argv) < 3:
             print("usage: %s --self-test <save.sfs> [--out <report.txt>]" % sys.argv[0])

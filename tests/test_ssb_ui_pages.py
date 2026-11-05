@@ -140,3 +140,13 @@ def test_no_internal_product_name_in_ui_text(app_module):
     joined = " ".join(texts)
     assert "SSB-I" not in joined
     assert "ssb-i" not in joined
+
+
+def test_dump_pages_writes_report(app_module, app, tmp_path):
+    """Abnahme im Paket: Seitenliste ohne Fenster ausgeben."""
+    out = tmp_path / "pages.txt"
+    assert app_module.dump_pages(str(out)) == 0
+    text = out.read_text(encoding="utf-8")
+    assert "pages: 3" in text
+    assert "Savegame Analyzer" in text and "Hex Viewer" in text
+    assert "aisc" not in text.lower()
