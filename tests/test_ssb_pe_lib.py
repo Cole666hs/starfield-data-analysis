@@ -1,6 +1,7 @@
 """Regression tests for SSB-I static PE integrity (ssb_pe_lib)."""
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import sys
 
@@ -9,7 +10,20 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parents[1]))
 from ssb_i.ssb_pe_lib import PE, PEIntegrityError, DEFAULT_TRUST_ROOT_SHA256  # noqa: E402,F401
 
-BIN = Path("/home/cole/Developer/seneca-ghidra/input/Starfield.original.exe")
+try:  # optional dependency: only the call-boundary check needs a disassembler
+    import capstone  # noqa: F401
+    HAS_CAPSTONE = True
+except Exception:  # pragma: no cover
+    HAS_CAPSTONE = False
+
+needs_capstone = pytest.mark.skipif(
+    not HAS_CAPSTONE, reason="capstone not installed (optional; only the call-boundary check needs it)")
+
+#: Reference binary for the integrity tests. Not shipped: point the environment
+#: variable at your own copy of the unmodified Starfield executable.
+BIN = Path(os.environ.get(
+    "STARFIELD_ORIGINAL_EXE",
+    "/home/cole/Developer/seneca-ghidra/input/Starfield.original.exe"))
 
 
 @pytest.fixture(scope="module")
@@ -108,6 +122,7 @@ def test_call_0922ab3_inside_image(pe: PE) -> None:
 
 
 # ------------------------------------------------- caller count (boundary)
+@needs_capstone
 def test_671_callers_boundary_validated(pe: PE) -> None:
     cand = [h for h in pe.raw_e8_targets() if h["target_rva"] == 0x2116840]
     verified, failures = pe.verify_call_boundaries(cand)
@@ -127,6 +142,7 @@ def test_linear_sweep_is_unreliable(pe: PE) -> None:
     assert len(cand) == 671  # step-by-1 raw count
 
 
+@needs_capstone
 def test_invalid_target_raises_via_boundaries(pe: PE) -> None:
     # a call_rva outside any function must be flagged (no_function), not crash
     cand = [{"call_rva": 0x8FFF_FFFF, "target_rva": 0x2116840, "bytes": "00", "insn_len": 5}]

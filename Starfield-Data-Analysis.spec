@@ -33,12 +33,30 @@ datas = []
 binaries = []
 hiddenimports = []
 
-# qdarkstyle ships real style resources (QSS + images)
+# qdarkstyle ships real style resources (QSS + images). The examples and the
+# light theme are not used by this program and are dropped from the package.
 for package in ("qdarkstyle",):
     d, b, h = collect_all(package)
     datas += d
     binaries += b
     hiddenimports += h
+
+
+def _is_needed_data(destination: str) -> bool:
+    """Drop resources this program never loads (package stays lean)."""
+    path = destination.replace("\\", "/").lower()
+    if "/example" in path:
+        return False
+    if "qdarkstyle/light/" in path:
+        return False
+    # Qt's own translations: this program's texts are English and Qt falls back
+    # to built-in English strings, so ~7 MB of .qm files are dead weight.
+    if "/translations/" in path or path.endswith("/translations"):
+        return False
+    return True
+
+
+datas = [(src, dst) for (src, dst) in datas if _is_needed_data(dst)]
 
 EXCLUDES = [
     # Not part of this product (AISC / runtime module)
@@ -52,6 +70,15 @@ EXCLUDES = [
     # Foreign GUI / numeric stacks that are never used
     "tkinter", "matplotlib", "numpy", "pandas", "scipy",
     "PyQt5", "PyQt6", "PySide2",
+    # Qt modules this program never imports (UI uses Widgets/Gui/Core only)
+    "PySide6.QtQml", "PySide6.QtQuick", "PySide6.QtQuickWidgets",
+    "PySide6.QtQuickControls2", "PySide6.QtPdf", "PySide6.QtPdfWidgets",
+    "PySide6.QtDataVisualization", "PySide6.QtOpenGL", "PySide6.QtOpenGLWidgets",
+    "PySide6.QtUiTools", "PySide6.QtPrintSupport", "PySide6.QtNetwork",
+    "PySide6.QtMultimedia", "PySide6.QtCharts", "PySide6.QtBluetooth",
+    "PySide6.QtPositioning", "PySide6.QtSerialPort", "PySide6.QtSql",
+    "PySide6.QtTest", "PySide6.QtHelp", "PySide6.QtDesigner",
+    "PySide6.QtXml", "PySide6.QtDBus",
 ]
 
 # --- graphical interface ---------------------------------------------------
