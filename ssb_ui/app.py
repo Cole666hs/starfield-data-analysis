@@ -415,6 +415,9 @@ def dump_pages(out_path: str | None = None) -> int:
              f"pages: {win.pages.count()}"]
     for index in range(win.sidebar.count()):
         label = win.sidebar.item(index).text().strip()
+        # Icons entfernen: die Ausgabe wird auch in Windows-Konsolen gelesen,
+        # die kein UTF-8 interpretieren (cp850/cp1252).
+        label = "".join(ch for ch in label if ord(ch) < 128).strip()
         widget = type(win.pages.widget(index)).__name__
         lines.append(f"  {index}: {label}  [{widget}]")
     for line in lines:
