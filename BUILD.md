@@ -1,138 +1,64 @@
-# Building Starfield Data Analysis from source
+# Building from source
 
-This document is the build recipe for the released packages. It is written for someone who has
-never seen the project: every command is copy-paste ready on **Windows (x64)** and **Linux (x64)**.
+Everything below was run on Windows 10 (10.0.26200) with Python 3.14.6, PySide6 6.11.2 and
+PyInstaller 6.22.2; the full build takes about 65 seconds. The same steps work on Linux x64.
 
-Verified with: **Python 3.13 and 3.14**, **PySide6 6.11.2**, **QDarkStyle 3.2.3**, **PyInstaller 6.22.2**.
+1. Clone and create a virtual environment.
 
----
+       git clone https://github.com/Cole666hs/starfield-data-analysis.git
+       cd starfield-data-analysis
+       python -m venv .venv
+       .venv\Scripts\activate          # Windows
+       source .venv/bin/activate       # Linux
 
-## 1. Requirements
+2. Install the dependencies. `requirements.txt` pins `PySide6==6.11.2` and `QDarkStyle==3.2.3`; the
+   only other things a build needs are PyInstaller and pytest.
 
-| Item | Version | Notes |
-|---|---|---|
-| Python | 3.13 or 3.14 (64-bit) | `python --version` |
-| pip | current | ships with Python |
-| PySide6 | 6.11.2 | Qt 6 runtime, installed by step 2 |
-| QDarkStyle | 3.2.3 | theme, installed by step 2 |
-| PyInstaller | 6.22.2 | only needed to produce the binary package |
-| capstone | 5.0.7 | **optional**; without it every command still works, only `PE.verify_call_boundaries()` reports `capstone_or_section_unavailable` |
+       pip install -r requirements.txt
+       pip install pyinstaller==6.22.2 pytest
 
-The tool itself has **no network code** and reads only the files you point it at.
+   `capstone` is optional. Without it every command still works and only
+   `PE.verify_call_boundaries()` reports `capstone_or_section_unavailable`.
 
-## 2. Get the source and install dependencies
+3. Run the tests. Qt needs an offscreen platform on a machine without a display.
 
-```bash
-git clone https://github.com/Cole666hs/starfield-data-analysis.git
-cd starfield-data-analysis
+       QT_QPA_PLATFORM=offscreen python -m pytest tests -q          # Linux
+       set QT_QPA_PLATFORM=offscreen && python -m pytest tests -q    # Windows cmd
 
-python -m venv .venv
-# Windows:  .venv\Scripts\activate
-# Linux:    source .venv/bin/activate
+   On a clean machine that is `77 passed, 28 skipped`. The tests behind those skips need real game
+   files that are not part of the repository; point the variables below at your own copies and the
+   run becomes `95 passed, 10 skipped`:
 
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
-python -m pip install "pyinstaller==6.22.2" pytest
-```
+       STARFIELD_ORIGINAL_EXE   unmodified Starfield.exe (trust root for the PE tests)
+       STARFIELD_EXE            the installed Starfield.exe
+       SDFA_REAL_SAVE           a real .sfs savegame
 
-`requirements.txt` pins exactly the two runtime packages (`PySide6==6.11.2`, `QDarkStyle==3.2.3`)
-and documents the optional ones.
+4. Build. The spec file already contains the entry points and the Qt collection settings, so no extra
+   flags are needed beyond a clean run.
 
-## 3. Run the test suite (before building)
+       pyinstaller --noconfirm --clean Starfield-Data-Analysis.spec
 
-```bash
-# Linux
-QT_QPA_PLATFORM=offscreen python -m pytest tests -q
+   The result is the usual onedir layout under `dist/StarfieldDataAnalysis/`:
+   `StarfieldDataAnalysis` (`.exe` on Windows) for the GUI, `sfda` (`.exe`) for the command line,
+   and `_internal/` with the Qt runtime.
 
-# Windows (cmd)
-set QT_QPA_PLATFORM=offscreen
-python -m pytest tests -q
-```
+5. Check that the binaries work before you package them.
 
-Expected: **77 passed, 28 skipped** on a clean machine.
+       dist/StarfieldDataAnalysis/sfda --version
+       dist/StarfieldDataAnalysis/StarfieldDataAnalysis --dump-pages --out pages.txt
 
-18 additional tests need real game artifacts that are **not** part of the repository. If you have
-them, point these environment variables at your own copies and the same suite reports
-**95 passed, 10 skipped**:
+   `--version` prints `sfda 1.0.0 - Starfield Data Analysis (Entropy Development)`. `--dump-pages`
+   writes the page inventory and exits without opening a window, which is what I use on a headless
+   machine to prove a package is intact. On Windows, use the `.exe` paths.
 
-| Variable | What it must point at |
-|---|---|
-| `STARFIELD_ORIGINAL_EXE` | an unmodified `Starfield.exe` (trust-root binary for the PE tests) |
-| `STARFIELD_EXE` | the installed `Starfield.exe` |
-| `SDFA_REAL_SAVE` | a real `.sfs` savegame |
+6. Package it the way the released files are packaged: copy `CHANGELOG.md`, `INSTALL.md`,
+   `LICENSE.txt`, `README.md` and `requirements.txt` into `dist/StarfieldDataAnalysis/`, write a
+   `SHA256SUMS` next to them, and zip the folder itself so that `StarfieldDataAnalysis/` is the
+   archive root.
 
-## 4. Build the application
+Two things are worth knowing before comparing results. PyInstaller builds are not
+bit-reproducible — two builds of the same commit differ byte-wise because of embedded timestamps and
+archive ordering, so a rebuilt binary will never match the SHA-256 of a downloaded one. And nothing
+in the build or at runtime needs network access.
 
-The repository ships a PyInstaller spec file; no flags are needed beyond `--noconfirm --clean`:
-
-```bash
-pyinstaller --noconfirm --clean Starfield-Data-Analysis.spec
-```
-
-Result (PyInstaller "onedir" layout):
-
-```
-dist/
-└── StarfieldDataAnalysis/
-    ├── StarfieldDataAnalysis.exe   # GUI (Windows)  /  StarfieldDataAnalysis (Linux)
-    ├── sfda.exe                    # command line   /  sfda (Linux)
-    └── _internal/                  # Qt6 + Python runtime
-```
-
-Build time is roughly 60–70 seconds on a modern machine (Windows, PySide6 included).
-
-## 5. Verify the build
-
-```bash
-# command line
-dist/StarfieldDataAnalysis/sfda --version
-# -> sfda 1.0.0 - Starfield Data Analysis (Entropy Development)
-
-# GUI acceptance check without opening a window (writes the page inventory as ASCII)
-dist/StarfieldDataAnalysis/StarfieldDataAnalysis --dump-pages --out pages.txt
-cat pages.txt
-# -> Starfield Data Analysis 1.0.0 (Entropy Development)
-#    pages: 3
-#      0: Savegame Analyzer  [SavegamePage]
-#      1: Hex Viewer  [HexViewPage]
-#      2: Event Log  [LogPage]
-```
-
-On Windows use `dist\StarfieldDataAnalysis\sfda.exe` and `...\StarfieldDataAnalysis.exe`.
-
-## 6. Package it the way the released files are packaged
-
-1. Copy `CHANGELOG.md`, `INSTALL.md`, `LICENSE.txt`, `README.md`, `requirements.txt` into
-   `dist/StarfieldDataAnalysis/`.
-2. Generate a checksum file next to them:
-
-```bash
-cd dist/StarfieldDataAnalysis
-# Windows PowerShell
-Get-ChildItem -Recurse -File | Where-Object { $_.Name -ne 'SHA256SUMS' } |
-  ForEach-Object { "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.FullName.Substring((Get-Location).Path.Length + 1).Replace('\','/'))" } |
-  Sort-Object | Set-Content -Encoding ASCII SHA256SUMS
-# Linux
-find . -type f ! -name SHA256SUMS -printf '%P\n' | sort | xargs -d '\n' sha256sum > SHA256SUMS
-```
-
-3. Zip the **folder** (not its contents) so the archive root is `StarfieldDataAnalysis/`.
-
-## 7. What is inside the binary package
-
-* one unsigned application executable per entry point (GUI + CLI), produced by PyInstaller;
-* the Qt6 runtime it links against (`_internal/`);
-* **no** starter/batch scripts, **no** packed bytecode archives of project code, **no** nested
-  archives inside the package.
-
-`PyInstaller` compresses Python modules into its own archive format by design — that is the standard
-behaviour of every PyInstaller build, not an obfuscation step: the same modules are readable here in
-the repository as plain `.py` files.
-
-## 8. Notes
-
-* **PyInstaller output is not bit-reproducible.** Two builds from the same commit produce
-  functionally identical but byte-different binaries (embedded timestamps, ordering). Compare source
-  and behaviour, not binary hashes.
-* The build does not need network access and does not download anything at runtime.
-* `LICENSE.txt` is MIT, © Entropy Development.
+Licence: MIT, see `LICENSE.txt`.
