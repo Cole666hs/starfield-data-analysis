@@ -21,9 +21,9 @@ needs_capstone = pytest.mark.skipif(
 
 #: Reference binary for the integrity tests. Not shipped: point the environment
 #: variable at your own copy of the unmodified Starfield executable.
-BIN = Path(os.environ.get(
-    "STARFIELD_ORIGINAL_EXE",
-    "/home/cole/Developer/seneca-ghidra/input/Starfield.original.exe"))
+_BIN_ENV = os.environ.get("STARFIELD_ORIGINAL_EXE", "")
+#: Nicht gesetzt -> bewusst nicht existierender Pfad (nie das Arbeitsverzeichnis).
+BIN = Path(_BIN_ENV) if _BIN_ENV else Path("__not_set__")
 
 
 @pytest.fixture(scope="module")

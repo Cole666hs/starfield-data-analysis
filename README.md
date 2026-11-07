@@ -120,6 +120,20 @@ stores that string in the language the save was written in.
 - Built with Qt for Python (PySide6) and QDarkStyle.
 - Thanks to the Starfield modding community for documenting the data formats.
 
+## Building from source
+
+The complete source of the released version is in this repository. `BUILD.md` contains the
+copy-paste build recipe (dependencies, `pyinstaller` call, verification commands, packaging), and
+`REPRODUCIBILITY.md` maps the files published on Nexus Mods to the commit that produced them.
+
+```bash
+git clone https://github.com/Cole666hs/starfield-data-analysis.git
+cd starfield-data-analysis
+python -m venv .venv && . .venv/bin/activate     # Windows: .venv\Scripts\activate
+pip install -r requirements.txt pyinstaller==6.22.2
+pyinstaller --noconfirm --clean Starfield-Data-Analysis.spec
+```
+
 ## License
 
 MIT — see `LICENSE.txt`. Copyright (c) 2026 Entropy Development.

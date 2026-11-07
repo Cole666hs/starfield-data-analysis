@@ -12,6 +12,7 @@ import json
 import struct
 import subprocess
 import sys
+import os
 from pathlib import Path
 
 import pytest
@@ -180,8 +181,11 @@ def test_pe_info_rejects_non_pe(tmp_path):
 
 
 # ------------------------------------------------------------ reale Datei (optional)
-REAL_SAVE = Path("/home/cole/ssb_probes/saves/Save44_A7460D2FM436F6C65_021038_20260927135235_24_0_4.sfs")
-REAL_PE = Path("/home/cole/Games/Starfield/Starfield.exe")
+# Reale Artefakte sind nicht Teil des Repos: Pfade kommen aus der Umgebung.
+_SAVE_ENV = os.environ.get("SDFA_REAL_SAVE", "")
+_PE_ENV = os.environ.get("STARFIELD_EXE", "")
+REAL_SAVE = Path(_SAVE_ENV) if _SAVE_ENV else Path("__not_set__")
+REAL_PE = Path(_PE_ENV) if _PE_ENV else Path("__not_set__")
 
 
 @pytest.mark.skipif(not REAL_SAVE.exists(), reason="kein reales Savegame vorhanden")

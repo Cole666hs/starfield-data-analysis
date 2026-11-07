@@ -1,6 +1,7 @@
 """VTable indirekter Aufruf Regression (SSB-I static, Punkt C)."""
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import sys
 import pytest
@@ -9,7 +10,9 @@ sys.path.insert(0, str(Path(__file__).parents[1]))
 
 from ssb_i.ssb_pe_lib import PE  # noqa: E402
 
-BIN = Path("/home/cole/Developer/seneca-ghidra/input/Starfield.original.exe")
+_BIN_ENV = os.environ.get("STARFIELD_ORIGINAL_EXE", "")
+#: Nicht gesetzt -> bewusst nicht existierender Pfad (nie das Arbeitsverzeichnis).
+BIN = Path(_BIN_ENV) if _BIN_ENV else Path("__not_set__")
 
 
 @pytest.fixture(scope="module")
