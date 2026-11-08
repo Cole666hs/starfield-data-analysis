@@ -83,6 +83,8 @@ class SavegamePage(QWidget):
         self.decompressed = None
         self.header = None
         self.plugins = None
+        self.string_pool = None
+        self.integrity_report = None
         # Letzter Dekodier-Fehler als Text. Der Selbsttest (--self-test) laeuft
         # kopflos und darf keinen modalen Dialog oeffnen — dort wird die
         # Meldung ueber dieses Feld ausgegeben statt in einer QMessageBox.
@@ -220,11 +222,51 @@ class SavegamePage(QWidget):
             }}
         """)
         self.tabs.addTab(self.diff_view, "Diff vs Other")
+
+        # Integritaets-Tab: Einzelpruefungen mit Status und Begruendung.
+        self.integrity_view = QPlainTextEdit()
+        self.integrity_view.setReadOnly(True)
+        self.integrity_view.setStyleSheet(self._mono_style())
+        self.tabs.addTab(self.integrity_view, "Integrity")
+
+        # String-Pool-Tab: Zusammenfassung sofort, volle Liste nur auf Klick.
+        self.strings_panel = QWidget()
+        strings_layout = QVBoxLayout(self.strings_panel)
+        strings_layout.setContentsMargins(10, 10, 10, 10)
+        strings_layout.setSpacing(6)
+        self.strings_summary = QLabel("No file loaded")
+        self.strings_summary.setStyleSheet(
+            f"color: {TEXT_DIM}; font-family: 'Cascadia Code'; font-size: 9pt;")
+        self.strings_summary.setWordWrap(True)
+        strings_layout.addWidget(self.strings_summary)
+        self.strings_load_btn = QPushButton("Load strings (read-only)")
+        self.strings_load_btn.setStyleSheet(self._btn_style(ACCENT_CYAN))
+        self.strings_load_btn.clicked.connect(self.on_load_strings)
+        self.strings_load_btn.setEnabled(False)
+        strings_layout.addWidget(self.strings_load_btn, alignment=Qt.AlignLeft)
+        self.strings_view = QPlainTextEdit()
+        self.strings_view.setReadOnly(True)
+        self.strings_view.setStyleSheet(self._mono_style())
+        strings_layout.addWidget(self.strings_view, stretch=1)
+        self.tabs.addTab(self.strings_panel, "String Pool")
+
         root.addWidget(self.tabs, stretch=1)
 
     # -----------------------------------------------------------------
     # Styles
     # -----------------------------------------------------------------
+    def _mono_style(self) -> str:
+        return f"""
+            QPlainTextEdit {{
+                background-color: {DARK_BG};
+                color: {TEXT_MAIN};
+                border: none;
+                font-family: "Cascadia Code", monospace;
+                font-size: 10pt;
+                padding: 10px;
+            }}
+        """
+
     def _btn_style(self, accent: str) -> str:
         return f"""
             QPushButton {{
@@ -305,14 +347,16 @@ class SavegamePage(QWidget):
         self.plugins_tree.clear()
         if getattr(info, "decode_state", "UNVERIFIED") == "VALIDATED":
             for p in info.normal:
-                self._add_plugin_row(p.name, "Normal", p.is_native)
+                self._add_plugin_row(p.name, "Normal", p.is_native, p)
             for p in info.light:
-                self._add_plugin_row(p.name, "Light", p.is_native)
+                self._add_plugin_row(p.name, "Light", p.is_native, p)
             for p in info.medium:
-                self._add_plugin_row(p.name, "Medium", p.is_native)
+                self._add_plugin_row(p.name, "Medium", p.is_native, p)
             self.plugins_count_label.setText(
-                "%d normal · %d light · %d medium"
-                % (len(info.normal), len(info.light), len(info.medium)))
+                "%d normal · %d light · %d medium · %d total\n"
+                "%d game · %d mod · %d with creation metadata"
+                % (len(info.normal), len(info.light), len(info.medium), info.total,
+                   info.game_count, info.mod_count, info.metadata_count))
         else:
             # Fail-closed: lieber nichts anzeigen als eine erfundene Liste.
             item = QTreeWidgetItem(["plugin list not decoded", "—"])
@@ -324,6 +368,29 @@ class SavegamePage(QWidget):
         # Header dump
         self.header_dump.setPlainText(self._format_header_full(header))
 
+        # Integritaetspruefung (rein lesend, gleiche Datei)
+        self._run_integrity(path)
+
+        # String-Pool: nur Zusammenfassung, Liste erst auf Klick
+        try:
+            self.string_pool = provider.read_string_pool(decomp, header, info)
+        except Exception as exc:                               # noqa: BLE001
+            self.string_pool = None
+            self.strings_summary.setText("String pool not readable: %s: %s"
+                                         % (type(exc).__name__, exc))
+        else:
+            pool = self.string_pool
+            self.strings_summary.setText(
+                "Status %s - %d strings (declared %d), %.1f%% printable\n"
+                "Array at 0x%X, read up to 0x%X. %s"
+                % (pool["status"], pool["count"], pool["declared_count"],
+                   pool["printable_ratio"] * 100,
+                   pool["string_array_offset"] or 0, pool["end"], pool["note"]))
+            self.strings_view.setPlainText(
+                'Read-only preview. Click "Load strings" to list the entries.')
+        self.strings_load_btn.setEnabled(
+            self.string_pool is not None and self.string_pool["status"] == "OK")
+
         # Status
         size_mb = len(self.decompressed or b"") / 1024 / 1024
         self.status_label.setText(
@@ -332,6 +399,70 @@ class SavegamePage(QWidget):
             f"<span style='color:{TEXT_DIM}'>({size_mb:.2f} MB decompressed · {container.chunk_count} chunks)</span>"
         )
         return True
+
+    def _run_integrity(self, path: str) -> None:
+        """Fuehrt die Integritaetspruefung aus und zeigt sie im Integrity-Tab.
+
+        UNKNOWN und NOT_CHECKED werden ausdruecklich als *nicht bewertet*
+        getrennt von Fehlern gefuehrt — ein fehlender Befund ist kein PASS.
+        """
+        from ssb_i.save_integrity import FAILED, WARNING, run_all
+
+        try:
+            report = run_all(path)
+        except Exception as exc:                               # noqa: BLE001
+            self.integrity_report = None
+            self.integrity_view.setPlainText(
+                "Integrity check not runnable: %s: %s" % (type(exc).__name__, exc))
+            return
+        self.integrity_report = report
+        coverage = report.coverage
+        header = [
+            "INTEGRITAET: %s" % report.total,
+            "PRUEFABDECKUNG: %d von %d Pruefungen bewertet "
+            "(%d PASS, %d WARNING, %d FAILED, %d UNKNOWN, %d NOT_CHECKED)"
+            % (coverage["assessed"], coverage["total"], coverage["PASS"],
+               coverage["WARNING"], coverage["FAILED"], coverage["UNKNOWN"],
+               coverage["NOT_CHECKED"]),
+        ]
+        if report.total == FAILED:
+            header.append("ACHTUNG: mindestens eine Strukturregel ist verletzt.")
+        elif report.total == WARNING:
+            header.append("Hinweis: auffaellige Befunde, aber kein sicherer Schaden.")
+        header.append("")
+        header.append("--- Einzelpruefungen ---")
+        lines = list(header)
+        for check in report.checks:
+            lines.append("%-4s %-12s %s" % (check.check_id, check.status, check.detail))
+        if report.gaps:
+            lines.append("")
+            lines.append("--- NICHT BEWERTET (kein Fehler, aber auch keine Freigabe) ---")
+            for gap in report.gaps:
+                lines.append("%-4s %-12s %s" % (gap.check_id, gap.status, gap.detail))
+        lines.append("")
+        lines.append("Hinweis: %s" % report.disclaimer)
+        self.integrity_view.setPlainText("\n".join(lines))
+
+    def on_load_strings(self) -> None:
+        """Listet eine begrenzte Auswahl der String-Pool-Eintraege (read-only)."""
+        if not self.string_pool:
+            return
+        pool = self.string_pool
+        limit = 500
+        lines = [
+            "String pool: %d entries (declared %d), status %s"
+            % (pool["count"], pool["declared_count"], pool["status"]),
+            "Read-only. No object identity is derived from these texts.",
+            "",
+            "%5s  %10s  %s" % ("INDEX", "OFFSET", "TEXT"),
+        ]
+        for entry in pool["strings"][:limit]:
+            lines.append("%5d  0x%08X  %s"
+                         % (entry["index"], entry["offset"], entry["text"]))
+        if len(pool["strings"]) > limit:
+            lines.append("... %d more entries (list capped at %d)"
+                         % (len(pool["strings"]) - limit, limit))
+        self.strings_view.setPlainText("\n".join(lines))
 
     def current_buffer(self) -> tuple[str | None, bytes]:
         """Der zuletzt dekodierte Puffer für andere Ansichten (z. B. Hex).
@@ -431,7 +562,8 @@ class SavegamePage(QWidget):
             lines.append(f"{k:.<26} {v}")
         return "\n".join(lines)
 
-    def _add_plugin_row(self, name: str, ptype: str, is_native: bool):
+    def _add_plugin_row(self, name: str, ptype: str, is_native: bool,
+                       entry=None):
         marker = "★ " if is_native else "  "
         item = QTreeWidgetItem([f"{marker}{name}", ptype])
         if is_native:
@@ -439,3 +571,20 @@ class SavegamePage(QWidget):
         else:
             item.setForeground(0, QColor(ACCENT_CYAN))
         self.plugins_tree.addTopLevelItem(item)
+        # Metadaten nur, wenn tatsaechlich vorhanden (nie Platzhalter zeigen).
+        state = getattr(entry, "metadata_state", "absent") if entry else "absent"
+        if state == "present":
+            details = ["creation: %s" % (entry.creation_name or "-")]
+            if entry.creation_id:
+                details.append("id: %s" % entry.creation_id)
+            if entry.version:
+                details.append("version: %s" % entry.version)
+            if entry.achievement_friendly:
+                details.append("achievement friendly")
+            child = QTreeWidgetItem(["    " + " | ".join(details), ""])
+            child.setForeground(0, QColor(ACCENT_GREEN))
+            item.addChild(child)
+        elif state == "unreadable":
+            child = QTreeWidgetItem(["    metadata unreadable", ""])
+            child.setForeground(0, QColor(ACCENT_PINK))
+            item.addChild(child)

@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from dataclasses import asdict
 from pathlib import Path
 
 # Eigener Pfad zuerst, damit der Aufruf aus jedem Arbeitsverzeichnis und aus
@@ -100,12 +101,37 @@ def cmd_save_info(args) -> int:
             "race": header.race_name,
         },
         "decompressed_bytes": size,
+        # Schema aus 1.0.0 bleibt gueltig (Zahlen je Kette). Die neuen Felder
+        # (total, categories, metadata, block) kommen additiv dazu; die
+        # vollstaendige Eintragsliste steht unter "entries".
         "plugins": {
             "decode_state": plugins.decode_state,
             "normal": len(plugins.normal),
             "light": len(plugins.light),
             "medium": len(plugins.medium),
             "note": plugins.note,
+            "total": plugins.total,
+            "declared": {
+                "normal": plugins.declared_normal,
+                "light": plugins.declared_light,
+                "medium": plugins.declared_medium,
+            },
+            "categories": {"game": plugins.game_count, "mod": plugins.mod_count},
+            "metadata": {
+                "present": plugins.metadata_count,
+                "unreadable": plugins.unreadable_count,
+            },
+            "block": {
+                "start": plugins.block_start,
+                "end": plugins.block_end,
+                "declared_end": plugins.block_end_declared,
+                "delta": plugins.block_delta,
+            },
+            "entries": {
+                "normal": [asdict(p) for p in plugins.normal],
+                "light": [asdict(p) for p in plugins.light],
+                "medium": [asdict(p) for p in plugins.medium],
+            },
         },
     }
     if args.json:
@@ -128,7 +154,10 @@ def cmd_save_info(args) -> int:
         ("Plugins", f"{plugins.decode_state} | "
                      f"{len(plugins.normal)} normal | "
                      f"{len(plugins.light)} light | "
-                     f"{len(plugins.medium)} medium"),
+                     f"{len(plugins.medium)} medium | "
+                     f"{plugins.total} total"),
+        ("Plugin types", f"{plugins.game_count} game | {plugins.mod_count} mod | "
+                         f"{plugins.metadata_count} with creation metadata"),
     ])
     if plugins.note:
         print(f"Note: {plugins.note}")
@@ -157,8 +186,19 @@ def cmd_save_plugins(args) -> int:
     for group in ("normal", "light", "medium"):
         print(f"\n{group} ({len(data[group])}):")
         for entry in data[group]:
-            native = "native" if entry.get("is_native") else "plugin"
-            print(f"  - {entry['name']}  [{native}]")
+            kind = entry.get("category", "mod")
+            marker = "native" if entry.get("is_native") else kind
+            print(f"  - {entry['name']}  [{marker}]")
+            if entry.get("metadata_state") == "present":
+                print(f"      creation : {entry.get('creation_name') or '-'}")
+                print(f"      id       : {entry.get('creation_id') or '-'}")
+                print(f"      version  : {entry.get('version') or '-'}")
+                if entry.get("achievement_friendly"):
+                    print("      achievement friendly: yes")
+            elif entry.get("metadata_state") == "unreadable":
+                print(f"      metadata unreadable: {entry.get('detail')}")
+    print(f"\nTotal: {data['counts']['total']} plugins "
+          f"({data['categories']['game']} game, {data['categories']['mod']} mod)")
     return EXIT_OK
 
 
@@ -211,6 +251,48 @@ def _load_pe(path: str):
         raise CliError(f"{src.name}: not a valid PE32+ image: {exc}") from exc
     except OSError as exc:
         raise CliError(f"{src.name}: not readable: {exc}") from exc
+
+
+def cmd_save_verify(args) -> int:
+    from ssb_i.save_integrity import FAILED, format_text, run_all
+
+    src = _require_file(args.save, "Savegame")
+    try:
+        report = run_all(src, data_dir=args.data_dir)
+    except (ValueError, OSError) as exc:
+        raise CliError(f"{src.name}: {type(exc).__name__}: {exc}") from exc
+    if args.json:
+        emit_json(report.to_dict())
+    else:
+        print(format_text(report))
+    return EXIT_ERROR if report.total == FAILED else EXIT_OK
+
+
+def cmd_save_strings(args) -> int:
+    from ssb_i.savegame_provider import SfsDecodeProvider
+
+    provider, _container, header, plugins, _size = _load_save(args.save)
+    payload = provider.decompress(str(args.save))
+    pool = provider.read_string_pool(payload, header, plugins)
+    if args.json:
+        payload_out = dict(pool)
+        if not args.all:
+            payload_out["strings"] = pool["strings"][:args.limit]
+            payload_out["truncated"] = len(pool["strings"]) > args.limit
+        emit_json(payload_out)
+        return EXIT_OK
+    print(f"Status        {pool['status']}")
+    print(f"Reason        {pool['reason']}")
+    print(f"Array offset  0x{pool['string_array_offset'] or 0:X}")
+    print(f"Strings       {pool['count']} (declared {pool['declared_count']})")
+    print(f"Printable     {pool['printable_ratio']:.1%}")
+    print(f"Note          {pool['note']}")
+    print()
+    for entry in pool["strings"][:args.limit]:
+        print("  [%4d] 0x%08X  %s" % (entry["index"], entry["offset"], entry["text"]))
+    if len(pool["strings"]) > args.limit:
+        print("  ... %d weitere (--limit oder --all)" % (len(pool["strings"]) - args.limit))
+    return EXIT_OK
 
 
 def cmd_pe_info(args) -> int:
@@ -303,6 +385,20 @@ def build_parser() -> argparse.ArgumentParser:
     p_diff.add_argument("--markdown", metavar="PATH",
                         help="also write a readable markdown report")
     p_diff.set_defaults(func=cmd_save_diff)
+
+    p_verify = save_sub.add_parser("verify", help="integrity checks with status model")
+    p_verify.add_argument("save")
+    p_verify.add_argument("--data-dir", metavar="DIR",
+                          help="Data directory for the plugin dependency check (I-12)")
+    p_verify.set_defaults(func=cmd_save_verify)
+
+    p_strings = save_sub.add_parser("strings", help="read the body string pool (read-only)")
+    p_strings.add_argument("save")
+    p_strings.add_argument("--limit", type=int, default=40,
+                           help="how many strings to print (default 40)")
+    p_strings.add_argument("--all", action="store_true",
+                           help="with --json: include every string")
+    p_strings.set_defaults(func=cmd_save_strings)
 
     pe = sub.add_parser("pe", help="inspect PE32+ binaries (e.g. Starfield.exe)")
     pe_sub = pe.add_subparsers(dest="command", required=True)

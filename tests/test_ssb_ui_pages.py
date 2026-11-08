@@ -125,7 +125,7 @@ def test_public_identity_is_consistent(app_module):
     assert PRODUCT_NAME == "Starfield Data Analysis"
     assert PRODUCT_SUBTITLE == "Advanced Starfield Inspection & Analysis Toolkit"
     assert DEVELOPER == "Entropy Development"
-    assert VERSION == "1.0.0"
+    assert VERSION == "1.5.3"   # 08.11.2026: Medium-Kette, Metadaten, Integritaet
     assert app_module.APP_NAME == PRODUCT_NAME
     assert VERSION in app_module.SSBWorkbench().windowTitle()
 
@@ -150,3 +150,84 @@ def test_dump_pages_writes_report(app_module, app, tmp_path):
     assert "pages: 3" in text
     assert "Savegame Analyzer" in text and "Hex Viewer" in text
     assert "aisc" not in text.lower()
+
+
+# ---------------------------------------------------------------------------
+# Integritaet und String-Pool in der Savegame-Seite (08.11.2026)
+# ---------------------------------------------------------------------------
+def test_savegame_page_runs_integrity_check(synthetic_save):
+    """Die Seite prueft nach dem Laden selbst und zeigt das Ergebnis."""
+    from ssb_ui.pages.savegame_page import SavegamePage
+
+    page = SavegamePage()
+    assert page.load_file(str(synthetic_save), show_dialog=False) is True
+    assert page.integrity_report is not None
+    text = page.integrity_view.toPlainText()
+    assert "INTEGRITAET:" in text
+    assert "I-01" in text and "I-11" in text
+    # UNKNOWN/NOT_CHECKED werden getrennt von Fehlern gefuehrt
+    assert "NICHT BEWERTET" in text
+    assert "Hinweis:" in text
+
+
+def test_savegame_page_shows_plugin_categories(synthetic_save):
+    from ssb_ui.pages.savegame_page import SavegamePage
+
+    page = SavegamePage()
+    assert page.load_file(str(synthetic_save), show_dialog=False) is True
+    counts = page.plugins_count_label.text()
+    assert "total" in counts and "game" in counts and "mod" in counts
+
+
+def test_savegame_page_offers_string_pool_separately(synthetic_save):
+    from ssb_ui.pages.savegame_page import SavegamePage
+
+    page = SavegamePage()
+    assert page.load_file(str(synthetic_save), show_dialog=False) is True
+    assert page.string_pool is not None
+    assert page.string_pool["status"] == "OK"
+    summary = page.strings_summary.text()
+    assert "strings" in summary and "printable" in summary
+    # volle Liste erst auf Klick — Standardansicht bleibt schlank
+    assert page.strings_load_btn.isEnabled() is True
+    assert "Read-only preview" in page.strings_view.toPlainText()
+    page.on_load_strings()
+    listed = page.strings_view.toPlainText()
+    assert "Sequence" in listed
+    assert "No object identity" in listed
+
+
+def test_savegame_page_metadata_only_when_present(synthetic_save):
+    """Metadaten erscheinen nur bei echtem Vorhandensein, nie als Platzhalter."""
+    from ssb_ui.pages.savegame_page import SavegamePage
+
+    page = SavegamePage()
+    assert page.load_file(str(synthetic_save), show_dialog=False) is True
+    children = []
+    for index in range(page.plugins_tree.topLevelItemCount()):
+        item = page.plugins_tree.topLevelItem(index)
+        for child_index in range(item.childCount()):
+            children.append(item.child(0 if child_index == 0 else child_index).text(0))
+    # Der synthetische Save hat einen Mod ohne Creation-Daten -> kein Kind.
+    assert all("18446744073709551615" not in text for text in children)
+
+
+def test_savegame_page_integrity_matches_cli(synthetic_save):
+    """UI und CLI muessen denselben Gesamtstatus nennen."""
+    import json
+    import subprocess
+    import sys as _sys
+    from pathlib import Path as _Path
+
+    from ssb_ui.pages.savegame_page import SavegamePage
+
+    page = SavegamePage()
+    assert page.load_file(str(synthetic_save), show_dialog=False) is True
+    repo = _Path(__file__).resolve().parents[1]
+    result = subprocess.run(
+        [_sys.executable, str(repo / "sfda_cli.py"), "--json", "save", "verify",
+         str(synthetic_save)],
+        capture_output=True, text=True, cwd=str(repo), timeout=180)
+    assert result.returncode in (0, 1), result.stderr
+    cli_total = json.loads(result.stdout)["total"]
+    assert cli_total == page.integrity_report.total

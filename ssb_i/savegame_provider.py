@@ -82,10 +82,32 @@ class DatHeader:
 
 @dataclass
 class PluginEntry:
+    """Ein Plugin-Eintrag aus dem Savegame-Plugin-Block.
+
+    Semantik der Felder (belegt 08.11.2026, Save-Version 153, 6 Saves):
+
+      * ``category``       "game" wenn ``extraInfo == 0`` (Master des Basisspiels),
+                           "mod" wenn ``extraInfo == 1`` (Creation/Plugin).
+      * ``metadata_state`` "present"   = extraInfo 1 UND mindestens ein echtes
+                                         Metadatenfeld (creation_name/creation_id)
+                           "absent"    = keine Metadaten hinterlegt (Game-Plugin
+                                         oder Mod ohne Creation-Angaben)
+                           "unreadable"= Laengenfeld laeuft aus dem Puffer; alle
+                                         Metadatenfelder bleiben None
+      * ``version``        Inhalt des ``flags``-Feldes, sofern er wie eine
+                           Versionsangabe aussieht (``<epoch>.<major>...``).
+                           Der Engine-Platzhalter wird zu ``None`` normalisiert.
+    """
     name: str
     is_native: bool
+    category: str = "mod"              # "game" | "mod"
     creation_name: str | None = None
     creation_id: str | None = None
+    version: str | None = None
+    achievement_friendly: bool | None = None
+    metadata_state: str = "absent"     # "present" | "absent" | "unreadable"
+    position: int = 0                  # Index innerhalb der Kette
+    detail: str = ""                   # Begruendung fuer metadata_state
 
 
 @dataclass
@@ -93,15 +115,46 @@ class PluginInfo:
     normal: list[PluginEntry] = field(default_factory=list)
     light: list[PluginEntry] = field(default_factory=list)
     medium: list[PluginEntry] = field(default_factory=list)
-    #: VALIDATED = Anzahl und Rahmen stimmen mit den deklarierten Zaehlern
-    #: ueberein. UNVERIFIED = die Liste ist NICHT als Plugin-Liste zu lesen.
+    #: VALIDATED = alle drei Ketten vollstaendig gelesen.
+    #: UNVERIFIED = mindestens eine Kette brach ab; alle Listen bleiben leer,
+    #: damit nie eine erfundene Plugin-Liste angezeigt wird.
     decode_state: str = "UNVERIFIED"
     note: str = ""
     declared_normal: int = 0
+    declared_light: int = 0
+    declared_medium: int = 0
+    #: Bytepositionen fuer die Integritaetspruefung (I-10/I-11)
+    block_start: int = 0
+    block_end: int = 0
+    block_end_declared: int = 0
 
     @property
     def total(self) -> int:
         return len(self.normal) + len(self.light) + len(self.medium)
+
+    @property
+    def block_delta(self) -> int:
+        """Differenz zwischen gelesenem und deklariertem Blockende (0 = exakt)."""
+        return self.block_end_declared - self.block_end
+
+    @property
+    def game_count(self) -> int:
+        return sum(1 for p in self.normal + self.light + self.medium
+                   if p.category == "game")
+
+    @property
+    def mod_count(self) -> int:
+        return self.total - self.game_count
+
+    @property
+    def metadata_count(self) -> int:
+        return sum(1 for p in self.normal + self.light + self.medium
+                   if p.metadata_state == "present")
+
+    @property
+    def unreadable_count(self) -> int:
+        return sum(1 for p in self.normal + self.light + self.medium
+                   if p.metadata_state == "unreadable")
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -112,9 +165,25 @@ class PluginInfo:
                 "normal": len(self.normal),
                 "light": len(self.light),
                 "medium": len(self.medium),
+                "total": self.total,
+            },
+            "declared": {
+                "normal": self.declared_normal,
+                "light": self.declared_light,
+                "medium": self.declared_medium,
+            },
+            "categories": {"game": self.game_count, "mod": self.mod_count},
+            "metadata": {
+                "present": self.metadata_count,
+                "unreadable": self.unreadable_count,
+            },
+            "block": {
+                "start": self.block_start,
+                "end": self.block_end,
+                "declared_end": self.block_end_declared,
+                "delta": self.block_delta,
             },
             "decode_state": self.decode_state,
-            "declared_normal": self.declared_normal,
             "note": self.note,
         }
 
@@ -187,8 +256,16 @@ class SfsDecodeProvider:
             chunk_count=chunk_count,
         )
 
-    def decompress(self, sfs_path: str) -> bytes:
-        """Decompress an entire .sfs to a single byte buffer. Returns raw decompressed bytes."""
+    def decompress(self, sfs_path: str, *, verify: bool = True) -> bytes:
+        """Decompress an entire .sfs to a single byte buffer.
+
+        ``verify=True`` (Default) vergleicht das Ergebnis mit der deklarierten
+        ``uncompressed_size`` und wirft ``ValueError`` bei Abweichung. Ohne diese
+        Pruefung liefen zwei nachgewiesene Fehlerfaelle still durch (08.11.2026):
+        ein manipuliertes Groessenfeld und ein verdoppeltes ``chunk_size_pre``,
+        das nur 50 % der Nutzdaten lieferte — bei plausibel aussehender Ausgabe.
+        """
+
         with open(sfs_path, "rb") as f:
             data = f.read()
         if data[:4] != SFS_MAGIC:
@@ -225,7 +302,13 @@ class SfsDecodeProvider:
                 )
             padded = (cs + padding_size - 1) & ~(padding_size - 1) if padding_size else cs
             pos += padded
-        return bytes(out)
+        result = bytes(out)
+        if verify and len(result) != uncompressed_size:
+            raise ValueError(
+                "decompressed length %d does not match declared uncompressed_size %d "
+                "(delta %+d bytes)" % (len(result), uncompressed_size,
+                                       len(result) - uncompressed_size))
+        return result
 
     # -----------------------------------------------------------------
     # SFS_SAVEGAME header + plugin info
@@ -296,7 +379,10 @@ class SfsDecodeProvider:
     # -- plugin name plausibility (a name, not a memory dump) -----------
     PLUGIN_EXTS = (b'.esm', b'.esl', b'.esp')
     PLUGIN_NAME_MAX = 96
-    PLUGIN_META_MAX = 256
+    #: Obergrenze fuer eine Plugin-Kette. Real gemessen: 25/50/5.
+    PLUGIN_CHAIN_MAX = 4096
+    #: Engine-Platzhalter im creationId-Feld, wenn keine Creation-ID hinterlegt ist.
+    PLACEHOLDER_ID = "18446744073709551615.undefined"
 
     @classmethod
     def is_plugin_name(cls, raw: bytes) -> bool:
@@ -322,137 +408,385 @@ class SfsDecodeProvider:
         return raw.decode("ascii"), start + size
 
     @classmethod
-    def _walk_names(cls, data: bytes, pos: int, count: int):
-        """Liest ``count`` Namen ab ``pos`` — synchronisiert ueber Metadaten.
+    def _read_string_field(cls, data: bytes, pos: int):
+        """Liest ``u16 len + ASCII``; Rueckgabe ``(wert, neue_position)``.
 
-        Jeder Record ist ``u16 len + Name`` gefolgt von einem optionalen
-        Metadaten-Block unbekannter Laenge (belegt: 0 bis ~100 Byte, Inhalt
-        NICHT dekodiert). Zwischen zwei Namen wird daher der naechste
-        plausible ``u16 len + Name`` gesucht.
-
-        Rueckgabe ``(namen, endposition)`` oder ``(None, pos)``. Die Kette
-        gilt nur als gelesen, wenn ALLE ``count`` Namen gefunden wurden.
+        Bei Ueberlauf ``(None, pos)`` — die Position bleibt dann unveraendert,
+        damit der Aufrufer den Abbruch eindeutig erkennt.
         """
-        names: list[str] = []
-        cursor = pos
-        for index in range(count):
-            got = cls._read_name_at(data, cursor)
-            if got is None:
-                return None, pos
-            name, name_end = got
-            names.append(name)
-            if index == count - 1:
-                return names, name_end
-            resync = None
-            limit = min(name_end + cls.PLUGIN_META_MAX, len(data) - 2)
-            for probe in range(name_end, limit):
-                if cls._read_name_at(data, probe) is not None:
-                    resync = probe
-                    break
-            if resync is None:
-                return None, pos
-            cursor = resync
-        return names, cursor
+        if pos + 2 > len(data):
+            return None, pos
+        size, = struct.unpack_from("<H", data, pos)
+        start = pos + 2
+        if start + size > len(data):
+            return None, pos
+        return data[start:start + size].decode("ascii", errors="replace"), start + size
 
     @classmethod
-    def _probe_counted_chain(cls, data: bytes, pos: int, window: int,
-                             count_width: int):
-        """Sucht ``count + count Namen`` in ``[pos, pos+window)``.
+    def _read_plugin_records(cls, data: bytes, pos: int, count: int, *, chain: str):
+        """Liest ``count`` Plugin-Records streng nach belegtem Format.
 
-        Der erste Offset, an dem die vollstaendige Kette parst, gewinnt.
-        ``count == 0`` ist nur gueltig, wenn ``count_width == 4`` (Medium-Block
-        kann leer sein); sonst waere jeder Nullbyte ein Treffer.
+        Format (Save-Version >= 140, belegt 08.11.2026 an 6 realen Saves,
+        gegen die Referenzimplementierung Nexus-Mods/StarfieldSaveTool geprueft
+        und bis zum bytegenauen Blockende verifiziert)::
+
+            u16 len + pluginName
+            u8  extraInfo              # 0 = Game-Plugin, 1 = Mod-Plugin
+            if extraInfo == 1:
+                u16 len + creationName
+                u16 len + creationId
+                u16 len + flags        # in der Praxis eine ASCII-Version
+                u8  achievementFriendly
+
+        Rueckgabe ``(entries, endposition, fehler)``. ``fehler`` ist ``""``,
+        wenn alle ``count`` Records vollstaendig gelesen wurden. Ein Record,
+        dessen Metadaten aus dem Puffer laufen, wird mit
+        ``metadata_state='unreadable'`` aufgenommen und die Kette abgebrochen —
+        es werden keine Metadaten aus benachbarten Records uebernommen.
         """
-        for probe in range(pos, min(pos + window, len(data))):
-            if count_width == 2:
-                if probe + 2 > len(data):
-                    break
-                count, = struct.unpack_from("<H", data, probe)
+        entries: list[PluginEntry] = []
+        cursor = pos
+        for index in range(count):
+            name, after_name = cls._read_string_field(data, cursor)
+            if name is None:
+                return entries, cursor, (
+                    "%s chain: name field truncated at 0x%X (record %d of %d)"
+                    % (chain, cursor, index, count))
+            if not cls.is_plugin_name(name.encode("ascii", "replace")):
+                return entries, cursor, (
+                    "%s chain: %r at 0x%X is not a plugin name (record %d of %d)"
+                    % (chain, name[:32], cursor, index, count))
+            cursor = after_name
+            if cursor >= len(data):
+                return entries, cursor, (
+                    "%s chain: no extraInfo byte for %r" % (chain, name))
+            extra = data[cursor]
+            cursor += 1
+            entry = PluginEntry(name=name, is_native=name in cls.NATIVE_PLUGINS,
+                                position=index)
+            if extra == 0:
+                entry.category = "game"
+                entry.metadata_state = "absent"
+                entry.detail = "game plugin (extraInfo=0)"
+                entries.append(entry)
+                continue
+
+            entry.category = "mod"
+            creation_name, cursor = cls._read_string_field(data, cursor)
+            if creation_name is None:
+                entry.metadata_state = "unreadable"
+                entry.detail = "creationName length runs past the buffer"
+                entries.append(entry)
+                return entries, cursor, (
+                    "%s chain: truncated creationName in %r" % (chain, name))
+            creation_id, cursor = cls._read_string_field(data, cursor)
+            if creation_id is None:
+                entry.metadata_state = "unreadable"
+                entry.detail = "creationId length runs past the buffer"
+                entries.append(entry)
+                return entries, cursor, (
+                    "%s chain: truncated creationId in %r" % (chain, name))
+            flags, cursor = cls._read_string_field(data, cursor)
+            if flags is None:
+                entry.metadata_state = "unreadable"
+                entry.detail = "flags length runs past the buffer"
+                entries.append(entry)
+                return entries, cursor, (
+                    "%s chain: truncated flags in %r" % (chain, name))
+            if cursor >= len(data):
+                entry.metadata_state = "unreadable"
+                entry.detail = "achievementFriendly byte missing"
+                entries.append(entry)
+                return entries, cursor, (
+                    "%s chain: missing achievementFriendly in %r" % (chain, name))
+            entry.achievement_friendly = data[cursor] != 0
+            cursor += 1
+
+            # Engine-Platzhalter ist "keine Creation-ID", keine echte ID.
+            real_name = creation_name or None
+            real_id = None if (not creation_id or creation_id == cls.PLACEHOLDER_ID) else creation_id
+            entry.creation_name = real_name
+            entry.creation_id = real_id
+            # ``flags`` traegt in der Praxis eine Version wie "1753987979.2.3".
+            entry.version = flags or None
+            if real_name or real_id:
+                entry.metadata_state = "present"
+                entry.detail = "creation metadata present"
             else:
-                if probe + 4 > len(data):
-                    break
-                count, = struct.unpack_from("<I", data, probe)
-            if count == 0:
-                if count_width == 4:
-                    return [], probe + 4
-                continue
-            if count > 4096:
-                continue
-            names, end = cls._walk_names(data, probe + count_width, count)
-            if names is not None:
-                return names, end
-        return None, pos
+                entry.metadata_state = "absent"
+                placeholder = (creation_id == cls.PLACEHOLDER_ID)
+                entry.detail = ("mod plugin without creation data"
+                                + (" (engine placeholder)" if placeholder else ""))
+            entries.append(entry)
+        return entries, cursor, ""
 
     def parse_plugin_info(self, decompressed: bytes, header: DatHeader) -> PluginInfo:
-        """Liest die Plugin-Liste — selbst-validierend, ohne Semantikraten.
+        """Liest den vollstaendigen Plugin-Block: normal, light UND medium.
 
-        BELEGT (04.11.2026, Save-Version 153, drei Saves aus einer Partie):
+        Reihenfolge (belegt, nicht angenommen): ``u8 unknown0``, ``u8 count0``,
+        ``u8 normalCount``, Normal-Records, ``u16 lightCount``, Light-Records,
+        ``u32 mediumCount``, Medium-Records.
 
-          * ``plugin_info_offset + 2`` traegt die Anzahl der Normal-Plugins
-            als ``u8`` (gemessen: 24 in Save41/Save42/Save43).
-          * Jeder Record ist ``u16 len`` + Name + optionaler Metadaten-Block
-            (0 bis ~100 Byte, Inhalt NICHT dekodiert).
-          * Danach folgt ein ``u16`` Anzahlfeld und die Light-Plugins in
-            derselben Record-Form.
-
-        WARUM DIE ALT-VERSION FALSCH WAR
-          Der alte Parser las nach jedem Namen sofort wieder ``u16 len``.
-          Wegen des Metadaten-Blocks desynchronisierte er ab dem zweiten
-          Plugin: 24 "normal" + 3.329 "light" Eintraege, davon genau EIN
-          plausibler Name. Ungetestet, weil alle Tests mit echten Saves
-          uebersprungen wurden (Dateien fehlten).
+        WARUM DIE VORVERSION FALSCHE ZAHLEN LIEF
+          Sie beendete die Kette nach den Light-Plugins und meldete
+          ``medium = 0``. Real tragen alle untersuchten Saves fuenf
+          Medium-Plugins; die Produktausgabe zeigte 75 statt 80 Eintraege
+          (Befund 08.11.2026, gegen die Referenzimplementierung verifiziert).
 
         ERGEBNIS
-          ``decode_state == 'VALIDATED'`` nur wenn die Anzahl der gelesenen
-          Namen exakt den deklarierten Zaehlern entspricht. Sonst
-          ``UNVERIFIED`` — dann sind die Listen leer und es wird nichts
-          angezeigt, was wie eine Plugin-Liste aussieht.
+          ``decode_state == 'VALIDATED'`` nur wenn alle drei Ketten vollstaendig
+          gelesen wurden. ``block_delta`` nennt die Differenz zwischen gelesenem
+          und deklariertem Blockende (0 = die Struktur geht bytegenau auf).
+          Bei einem Abbruch bleiben ALLE Listen leer — lieber nichts anzeigen
+          als eine erfundene Plugin-Liste.
         """
         info = PluginInfo()
         pos = header.plugin_info_offset
+        info.block_start = pos
+        info.block_end_declared = pos + header.plugin_info_size
+        info.block_end = pos
         if pos + 3 > len(decompressed):
-            info.decode_state = "UNVERIFIED"
             info.note = "plugin_info_offset lies outside the file"
             return info
 
-        declared_normal = decompressed[pos + 2]
-        info.declared_normal = declared_normal
+        info.declared_normal = decompressed[pos + 2]
+        cursor = pos + 3
 
-        names, end = self._walk_names(decompressed, pos + 3, declared_normal)
-        if names is None:
-            info.decode_state = "UNVERIFIED"
-            info.note = ("normal plugins not fully readable "
-                         "(declared %d, aborted at offset 0x%X)"
-                         % (declared_normal, pos + 3))
+        normal, cursor, error = self._read_plugin_records(
+            decompressed, cursor, info.declared_normal, chain="normal")
+        if error:
+            info.note = error
             return info
-        info.normal = [PluginEntry(name=n, is_native=n in self.NATIVE_PLUGINS)
-                       for n in names]
 
-        # Light-Kette: Anzahlfeld liegt hinter dem Metadaten-Block des letzten
-        # Normal-Plugins. Nur eine vollstaendig parsende Kette wird akzeptiert.
-        light, light_end = self._probe_counted_chain(
-            decompressed, end, self.PLUGIN_META_MAX, count_width=2)
-        if light is None:
-            info.decode_state = "UNVERIFIED"
-            info.note = ("normal plugins read (%d), but no valid "
-                         "Light-Kette ab 0x%X" % (len(names), end))
-            info.normal = []
+        if cursor + 2 > len(decompressed):
+            info.note = "light plugin count truncated at 0x%X" % cursor
             return info
-        info.light = [PluginEntry(name=n, is_native=n in self.NATIVE_PLUGINS)
-                      for n in light]
+        info.declared_light, = struct.unpack_from("<H", decompressed, cursor)
+        cursor += 2
+        if info.declared_light > self.PLUGIN_CHAIN_MAX:
+            info.note = ("implausible light plugin count %d at 0x%X"
+                         % (info.declared_light, cursor - 2))
+            return info
 
-        # Medium-Block (save_version >= 122): u32 Anzahl, darf 0 sein.
-        medium, _ = self._probe_counted_chain(
-            decompressed, light_end, 32, count_width=4)
-        info.medium = [PluginEntry(name=n, is_native=n in self.NATIVE_PLUGINS)
-                       for n in (medium or [])]
+        light, cursor, error = self._read_plugin_records(
+            decompressed, cursor, info.declared_light, chain="light")
+        if error:
+            info.note = error
+            return info
 
+        if cursor + 4 > len(decompressed):
+            info.note = "medium plugin count truncated at 0x%X" % cursor
+            return info
+        info.declared_medium, = struct.unpack_from("<I", decompressed, cursor)
+        cursor += 4
+        if info.declared_medium > self.PLUGIN_CHAIN_MAX:
+            info.note = ("implausible medium plugin count %d at 0x%X"
+                         % (info.declared_medium, cursor - 4))
+            return info
+
+        medium, cursor, error = self._read_plugin_records(
+            decompressed, cursor, info.declared_medium, chain="medium")
+        if error:
+            info.note = error
+            return info
+
+        info.normal, info.light, info.medium = normal, light, medium
+        info.block_end = cursor
         info.decode_state = "VALIDATED"
-        info.note = ("%d normal (declared %d), %d light, %d medium; "
-                     "per-record metadata block NOT decoded"
-                     % (len(info.normal), declared_normal, len(info.light),
-                        len(info.medium)))
+        info.note = (
+            "%d normal, %d light, %d medium (declared %d/%d/%d); "
+            "%d game + %d mod plugins; block delta %d bytes"
+            % (len(normal), len(light), len(medium),
+               info.declared_normal, info.declared_light, info.declared_medium,
+               info.game_count, info.mod_count, info.block_delta))
         return info
+
+
+    # -----------------------------------------------------------------
+    # Container-Geometrie (fuer die Integritaetspruefung)
+    # -----------------------------------------------------------------
+    def read_chunk_table(self, sfs_path: str) -> dict[str, Any]:
+        """Liest die echte Chunk-Groessentabelle aus dem Dateikopf.
+
+        ``SfsContainer.chunks`` bleibt aus Kompatibilitaetsgruenden leer; die
+        Tabelle wird hier materialisiert, damit I-03/I-04 dagegen pruefen
+        koennen, ohne den Dekompressionspfad zu duplizieren.
+        """
+        with open(sfs_path, "rb") as f:
+            data = f.read()
+        if data[:4] != SFS_MAGIC:
+            raise ValueError("Not an SFS file: %r" % data[:4])
+        off = 4
+        off += 4                                            # version0
+        chunk_sizes_offset, = struct.unpack_from("<q", data, off); off += 8
+        off += 8                                            # unknown0
+        compressed_offset, = struct.unpack_from("<q", data, off); off += 8
+        uncompressed_size, = struct.unpack_from("<q", data, off); off += 8
+        off += 4                                            # version1 (float)
+        off += 4                                            # unknown1
+        chunk_size_pre, = struct.unpack_from("<q", data, off); off += 8
+        padding_size, = struct.unpack_from("<q", data, off); off += 8
+        off += 4                                            # unknown2
+        compression = data[off:off + 4]
+        count = ((uncompressed_size + chunk_size_pre - 1) // chunk_size_pre
+                 if chunk_size_pre else 0)
+        sizes: list[int] = []
+        if count and chunk_sizes_offset + 4 * count <= len(data):
+            sizes = list(struct.unpack_from("<%di" % count, data, chunk_sizes_offset))
+        padded = [((s + padding_size - 1) & ~(padding_size - 1)) if padding_size else s
+                  for s in sizes]
+        return {
+            "version0": struct.unpack_from("<i", data, 4)[0],
+            "chunk_sizes_offset": chunk_sizes_offset,
+            "compressed_offset": compressed_offset,
+            "uncompressed_size": uncompressed_size,
+            "chunk_size_pre": chunk_size_pre,
+            "padding_size": padding_size,
+            "compression": compression.decode("ascii", "replace"),
+            "declared_chunk_count": count,
+            "chunk_sizes": sizes,
+            "padded_sizes": padded,
+            "sum_padded": sum(padded),
+            "table_end": chunk_sizes_offset + 4 * count,
+            "file_size": len(data),
+            "data_rest": len(data) - compressed_offset,
+            "header_end": off + 4,
+        }
+
+    # -----------------------------------------------------------------
+    # String-Pool (read-only, KEINE Objektidentitaet)
+    # -----------------------------------------------------------------
+    #: Ab hier gilt ein String-Array als plausibel lesbar.
+    STRING_POOL_MIN_PRINTABLE = 0.90
+    #: Obergrenze, damit ein beschaedigter Zaehler keinen Riesenlauf ausloest.
+    STRING_POOL_MAX = 200_000
+
+    def read_string_pool(self, decompressed: bytes, header: DatHeader,
+                         plugin_info: PluginInfo) -> dict[str, Any]:
+        """Liest die String-Tabelle am Anfang des Save-Bodys — ausschliesslich lesend.
+
+        Belegte Struktur (08.11.2026, 6/6 reale Saves, gegen das 010-Editor-
+        Template von Nexus-Mods/StarfieldSaveTool verifiziert)::
+
+            nach plugin_info_end:
+              u16  unlock0                     # in allen Saves 1
+              u32  pointer[12]                 # pointer[2] zeigt auf den Folgebenutzer
+              byte padding[52]
+              u32  pointer0                    # Inhalt unbedeutet
+              u32  strings_array_offset        # Offset der String-Tabelle
+              u32  unknown0                    # in allen Saves 1
+              bei strings_array_offset:
+                u16 count
+                count x ( u16 len + UTF-8 text )
+
+        HARTE GRENZE
+          Diese Funktion liefert Text und Position. Sie belegt KEINE
+          Objektidentitaet: keine FormID, kein Record, keine Referenz. Die
+          uebrigen elf Pointer bleiben UNKNOWN und werden nur als Zahl
+          mitgegeben, nicht interpretiert.
+
+        Rueckgabe-Dict mit ``status``: ``OK`` | ``UNKNOWN`` | ``UNREADABLE``.
+        """
+        result: dict[str, Any] = {
+            "status": "UNKNOWN",
+            "reason": "",
+            "block_start": plugin_info.block_end,
+            "pointer_table": [],
+            "pointer_table_offsets": [],
+            "string_array_offset": None,
+            "declared_count": 0,
+            "count": 0,
+            "strings": [],
+            "end": plugin_info.block_end,
+            "printable_ratio": 0.0,
+            "unverified_pointers": [],
+            "note": ("Text-Pool ohne Objektidentitaet: keine FormID-, Record- "
+                     "oder Referenzzuordnung."),
+        }
+        data = decompressed
+        base = plugin_info.block_end or (header.plugin_info_offset + header.plugin_info_size)
+        result["block_start"] = base
+        if base <= 0 or base + 2 + 48 + 52 + 12 > len(data):
+            result["reason"] = "body head beyond buffer (base 0x%X)" % base
+            return result
+
+        unlock, = struct.unpack_from("<H", data, base)
+        pointers = list(struct.unpack_from("<12I", data, base + 2))
+        block2 = base + 2 + 48 + 52
+        pointer0, strings_offset, unknown0 = struct.unpack_from("<3I", data, block2)
+        result["unlock"] = unlock
+        result["pointer_table"] = pointers
+        result["pointer_table_offsets"] = ["0x%X" % v for v in pointers]
+        result["string_array_offset"] = strings_offset
+        result["block2_offset"] = block2
+        result["unknown0_block2"] = unknown0
+
+        # Belegte Selbstkonsistenz: pointer[2] zeigt auf den Folgebenutzer.
+        if unlock != 1 or unknown0 != 1:
+            result["reason"] = ("unexpected marker values (unlock=%d, block2=%d); "
+                                "structure not recognised" % (unlock, unknown0))
+            return result
+        if pointers[2] != block2:
+            result["reason"] = ("pointer[2]=0x%X does not point at the follow-up block "
+                                "0x%X" % (pointers[2], block2))
+            return result
+        if not (0 < strings_offset < len(data) - 2):
+            result["reason"] = "string offset 0x%X outside payload" % strings_offset
+            return result
+
+        declared, = struct.unpack_from("<H", data, strings_offset)
+        result["declared_count"] = declared
+        if declared > self.STRING_POOL_MAX:
+            result["reason"] = "implausible string count %d" % declared
+            return result
+
+        cursor = strings_offset + 2
+        strings: list[dict[str, Any]] = []
+        printable = 0
+        error = ""
+        for index in range(declared):
+            if cursor + 2 > len(data):
+                error = "length field of string %d runs past the buffer" % index
+                break
+            length, = struct.unpack_from("<H", data, cursor)
+            start = cursor + 2
+            if start + length > len(data):
+                error = "string %d (len %d) runs past the buffer" % (index, length)
+                break
+            raw = data[start:start + length]
+            try:
+                text = raw.decode("utf-8")
+                ok = True
+            except UnicodeDecodeError:
+                text = raw.decode("utf-8", "replace")
+                ok = False
+            if ok and all(ch.isprintable() or ch in "\t" for ch in text):
+                printable += 1
+            strings.append({"index": index, "text": text, "offset": start,
+                            "length": length, "status": "ok" if ok else "invalid-utf8"})
+            cursor = start + length
+
+        result["strings"] = strings
+        result["count"] = len(strings)
+        result["end"] = cursor
+        result["printable_ratio"] = (printable / len(strings)) if strings else 0.0
+        # Die uebrigen Pointer werden NICHT interpretiert, nur auf Bereich geprueft.
+        result["unverified_pointers"] = [
+            {"index": i, "value": v, "inside_payload": 0 < v < len(data)}
+            for i, v in enumerate(pointers) if i != 2]
+        if error:
+            result["status"] = "UNREADABLE"
+            result["reason"] = error
+            return result
+        if not strings or result["printable_ratio"] < self.STRING_POOL_MIN_PRINTABLE:
+            result["status"] = "UNKNOWN"
+            result["reason"] = ("printable ratio %.3f below threshold %.2f"
+                                % (result["printable_ratio"], self.STRING_POOL_MIN_PRINTABLE))
+            return result
+        result["status"] = "OK"
+        result["reason"] = ("%d strings read, %.1f%% printable"
+                            % (len(strings), result["printable_ratio"] * 100))
+        return result
 
     # -----------------------------------------------------------------
     # Difference analysis

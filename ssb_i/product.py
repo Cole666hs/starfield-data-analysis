@@ -19,7 +19,7 @@ PRODUCT_SUBTITLE = "Advanced Starfield Inspection & Analysis Toolkit"
 DEVELOPER = "Entropy Development"
 
 #: Release version of the product (not the internal library generation)
-VERSION = "1.0.0"
+VERSION = "1.5.3"
 
 #: Executable / archive base name (no spaces: safe for shells and archives)
 SLUG = "StarfieldDataAnalysis"

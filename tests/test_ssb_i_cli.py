@@ -74,7 +74,8 @@ def run_cli(*args: str) -> subprocess.CompletedProcess:
 def test_version_exits_zero():
     result = run_cli("--version")
     assert result.returncode == 0
-    assert "Starfield Data Analysis" in result.stdout and "1.0.0" in result.stdout
+    from ssb_i.product import VERSION as _V
+    assert "Starfield Data Analysis" in result.stdout and _V in result.stdout
 
 
 def test_unknown_subcommand_is_usage_error():
@@ -180,21 +181,21 @@ def test_pe_info_rejects_non_pe(tmp_path):
     assert "PE" in result.stderr
 
 
-# ------------------------------------------------------------ reale Datei (optional)
-# Reale Artefakte sind nicht Teil des Repos: Pfade kommen aus der Umgebung.
-_SAVE_ENV = os.environ.get("SDFA_REAL_SAVE", "")
+# -------------------------------------------- reale Datei (Pflicht, siehe conftest)
+# Reale Artefakte sind nicht Teil des Repos: der Savegame-Pfad kommt aus
+# SAVE_PROBES (Default ~/ssb_probes) und ist eine Pflicht-Fixture — kein Skip.
 _PE_ENV = os.environ.get("STARFIELD_EXE", "")
-REAL_SAVE = Path(_SAVE_ENV) if _SAVE_ENV else Path("__not_set__")
 REAL_PE = Path(_PE_ENV) if _PE_ENV else Path("__not_set__")
 
 
-@pytest.mark.skipif(not REAL_SAVE.exists(), reason="kein reales Savegame vorhanden")
-def test_real_save_plugins_validated():
-    result = run_cli("--json", "save", "plugins", str(REAL_SAVE))
-    assert result.returncode == 0
+def test_real_save_plugins_validated(real_saves):
+    result = run_cli("--json", "save", "plugins", str(real_saves[0]))
+    assert result.returncode == 0, result.stderr
     payload = json.loads(result.stdout)
     assert payload["decode_state"] == "VALIDATED"
-    assert len(payload["normal"]) > 0
+    assert payload["counts"]["total"] == 80
+    assert payload["counts"]["medium"] == 5
+    assert payload["categories"]["game"] == 9
 
 
 @pytest.mark.skipif(not REAL_PE.exists(), reason="kein Starfield.exe vorhanden")
