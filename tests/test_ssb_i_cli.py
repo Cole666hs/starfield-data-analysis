@@ -88,15 +88,24 @@ def test_save_info_reports_synthetic_header(synthetic_save):
     result = run_cli("--json", "save", "info", str(synthetic_save))
     assert result.returncode == 0, result.stderr
     payload = json.loads(result.stdout)
-    assert payload["savegame"]["player_name"] == "Cole"
+    # R1_6: der Spielername ist NICHT mehr oeffentlich (W-1/F-1).
+    assert "player_name" not in payload["savegame"]
+    # Ebenso Ort, Spielzeit und Rasse (O-5).
+    assert "player_location" not in payload["savegame"]
+    assert "playtime" not in payload["savegame"]
+    assert "race" not in payload["savegame"]
+    assert "Cole" not in result.stdout
     assert payload["savegame"]["player_level"] == 24
     assert payload["savegame"]["save_version"] == 153
     assert payload["container"]["chunk_count"] >= 1
     assert payload["decompressed_bytes"] > 0
+    # R1_6 / F-2: kein absoluter Pfad und kein Dateiname im JSON.
+    assert "file" not in payload
+    assert "synthetic" not in result.stdout
 
 
 def test_save_info_plugins_fail_closed(synthetic_save):
-    """Ohne lesbare Plugin-Liste: UNVERIFIED + Begründung, keine Erfindung."""
+    """Ohne lesbare Plugin-Liste: UNVERIFIED + Begruendung, keine Erfindung."""
     result = run_cli("--json", "save", "info", str(synthetic_save))
     assert result.returncode == 0
     plugins = json.loads(result.stdout)["plugins"]
@@ -108,7 +117,9 @@ def test_save_info_plugins_fail_closed(synthetic_save):
 def test_save_info_text_output_is_readable(synthetic_save):
     result = run_cli("save", "info", str(synthetic_save))
     assert result.returncode == 0
-    assert "Player" in result.stdout
+    # R1_6: "Player" und der Dateiname sind entfernt.
+    assert "Player" not in result.stdout
+    assert "Level" in result.stdout
     assert "UNVERIFIED" in result.stdout
 
 
@@ -117,9 +128,16 @@ def test_save_header_json_fields(synthetic_save):
     result = run_cli("--json", "save", "header", str(synthetic_save))
     assert result.returncode == 0
     header = json.loads(result.stdout)
-    for key in ("player_name", "player_level", "save_version", "current_game_version",
+    # R1_6: die oeffentliche Headeransicht ist eine Allowlist. Der
+    # Spielername ist nicht mehr enthalten.
+    for key in ("player_level", "save_version", "current_game_version",
                 "plugin_info_offset", "plugin_info_size"):
         assert key in header
+    assert "player_name" not in header
+    assert "player_location" not in header
+    assert "race_name" not in header
+    assert "playtime" not in header
+    assert "Cole" not in result.stdout
     assert header["current_game_version"] == "1.16.244.0"
 
 

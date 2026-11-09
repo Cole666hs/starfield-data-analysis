@@ -33,9 +33,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from ssb_i.product import (  # noqa: E402
     CLI_PROG, DEVELOPER, PRODUCT_NAME, PRODUCT_SUBTITLE, VERSION,
 )
+from ssb_i.savegame_provider import public_header_view  # noqa: E402
 
 EXIT_OK = 0
 EXIT_ERROR = 1
+EXIT_USAGE = 2
 
 
 class CliError(RuntimeError):
@@ -46,7 +48,59 @@ class CliError(RuntimeError):
 # Ausgabe
 # ----------------------------------------------------------------------------
 def emit_json(payload: object) -> None:
-    print(json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False))
+    """Schreibt genau ein JSON-Dokument auf stdout.
+
+    Fehlt stdout (PyInstaller ohne Konsolenfenster), weicht die Ausgabe auf
+    stderr aus: sonst ginge die Fehlerinformation verloren, obwohl ein Kanal
+    vorhanden ist. Der Vertrag „stdout enthaelt genau ein JSON-Dokument" bleibt
+    gewahrt, weil stdout in diesem Fall gar nicht existiert.
+
+    Gibt es auch stderr nicht, wird nichts ausgegeben — der Exit-Code traegt
+    dann allein die Information, es wird **nicht** so getan, als waere die
+    Ausgabe erfolgt.
+    """
+    text = json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False)
+    if _write_line("stdout", text):
+        return
+    _write_line("stderr", text)
+
+
+def _write_line(stream_name: str, text: str) -> bool:
+    """Schreibt eine Zeile auf den benannten Stream, falls er existiert.
+
+    ``sys.stdout`` und ``sys.stderr`` koennen ``None`` sein — das ist der Fall
+    bei einem PyInstaller-Bundle ohne Konsolenfenster (``console=False``) und
+    bei GUI-Anwendungen unter Windows. Ein ``print(..., file=None)`` waere
+    stiller Verlust der Meldung.
+
+    Der Rueckfall geht auf ``sys.__stdout__``/``sys.__stderr__``: das sind die
+    originalen Streams, die auch dann noch existieren, wenn die Anwendung
+    ``sys.stdout`` bewusst auf ``None`` gesetzt hat.
+
+    Rueckgabe: True, wenn die Zeile auf einem Stream gelandet ist.
+    """
+    stream = getattr(sys, stream_name, None)
+    if stream is None:
+        stream = getattr(sys, "__%s__" % stream_name, None)
+    if stream is None:
+        return False
+    try:
+        print(text, file=stream, flush=True)
+    except Exception:                                          # noqa: BLE001
+        return False
+    return True
+
+
+def emit_error_line(text: str) -> bool:
+    """Fehlerzeile auf stderr — mit Rueckfall, wenn stderr fehlt.
+
+    Wird der Fehlerkanal komplett vermisst (kein stdout und kein stderr),
+    geht die Zeile an ``sys.__stderr__``; ist auch das nicht vorhanden, gibt
+    es keinen Kanal — dann wird **nichts** behauptet und nichts ausgegeben.
+    """
+    if _write_line("stderr", text):
+        return True
+    return _write_line("stdout", text)
 
 
 def emit_lines(pairs: list[tuple[str, object]]) -> None:
@@ -81,24 +135,25 @@ def _load_save(path: str):
     except CliError:
         raise
     except (ValueError, OSError) as exc:
-        raise CliError(f"{src.name}: {type(exc).__name__}: {exc}") from exc
+        # R1_6 / F-6: kein Dateiname in der oeffentlichen Fehlerzeile.
+        # Die Ursache bleibt kontrolliert verstaendlich.
+        raise CliError(f"Savegame nicht lesbar: {_public_error(exc)}") from exc
     return provider, container, header, plugins, len(decompressed)
 
 
 def cmd_save_info(args) -> int:
     _provider, container, header, plugins, size = _load_save(args.save)
+    # R1_6: die oeffentliche Sicht kommt aus public_header_view() — ohne
+    # Spielername, Ort, Rasse und Spielzeit (O-5, W-1). Der absolute Pfad
+    # des Saves wird nicht ausgegeben (F-2).
+    public_header = public_header_view(header)
     payload = {
-        "file": str(Path(args.save).resolve()),
         "container": container.to_dict(),
         "savegame": {
-            "player_name": header.player_name,
             "player_level": header.player_level,
-            "player_location": header.player_location,
             "save_version": header.save_version,
             "game_version": header.current_game_version,
             "created_game_version": header.created_game_version,
-            "playtime": header.playtime,
-            "race": header.race_name,
         },
         "decompressed_bytes": size,
         # Schema aus 1.0.0 bleibt gueltig (Zahlen je Kette). Die neuen Felder
@@ -139,13 +194,12 @@ def cmd_save_info(args) -> int:
         return EXIT_OK
     c = payload["container"]
     s = payload["savegame"]
+    # R1_6: kein Spielername, kein Ort, keine Spielzeit, kein Dateiname
+    # (W-1, O-5, F-2). Die uebrigen fachlichen Metadaten bleiben.
     emit_lines([
-        ("File", Path(args.save).name),
-        ("Player", f"{s['player_name']} (level {s['player_level']})"),
-        ("Location", s["player_location"]),
+        ("Level", f"{s['player_level']}"),
         ("Save version", s["save_version"]),
         ("Game version", s["game_version"]),
-        ("Playtime", s["playtime"]),
         ("BCPS chunks", c["chunk_count"]),
         ("Decompressed", f"{size:,} bytes"),
         # Trennzeichen bewusst ASCII: die Windows-Konsole (cp850/cp1252) kennt
@@ -166,7 +220,10 @@ def cmd_save_info(args) -> int:
 
 def cmd_save_header(args) -> int:
     _provider, _container, header, _plugins, _size = _load_save(args.save)
-    data = header.to_dict()
+    # R1_6: ausschliesslich die kontrollierte oeffentliche Headeransicht.
+    # asdict(header) (die vollstaendige interne Repräsentation) wird hier
+    # NICHT mehr verwendet.
+    data = public_header_view(header)
     if args.json:
         emit_json(data)
         return EXIT_OK
@@ -210,14 +267,14 @@ def cmd_save_diff(args) -> int:
     try:
         report = analyze_paths(str(left), str(right), max_gap=args.max_gap)
     except (ValueError, OSError) as exc:
-        raise CliError(f"differential failed: {type(exc).__name__}: {exc}") from exc
+        raise CliError(f"differential failed: {_public_error(exc)}") from exc
 
     if args.markdown:
         out = Path(args.markdown)
         try:
             out.write_text(markdown_report(report), encoding="utf-8")
         except OSError as exc:
-            raise CliError(f"markdown report not writable: {exc}") from exc
+            raise CliError(f"markdown report not writable: {_public_error(exc)}") from exc
         print(f"Markdown report: {out}", file=sys.stderr)
 
     if args.json:
@@ -225,9 +282,11 @@ def cmd_save_diff(args) -> int:
         return EXIT_OK
     analysis = report.get("analysis") or {}
     sizes = analysis.get("sizes") or {}
+    # R1_6 / F-2: keine Savegame-Dateinamen in der oeffentlichen Ausgabe.
+    # Die Byte-Zahlen identifizieren die Vergleiche ausreichend.
     emit_lines([
-        ("A", f"{left.name} ({sizes.get('a', '?')} Bytes)"),
-        ("B", f"{right.name} ({sizes.get('b', '?')} Bytes)"),
+        ("A size", f"{sizes.get('a', '?')} Bytes"),
+        ("B size", f"{sizes.get('b', '?')} Bytes"),
         ("Differing bytes", analysis.get("differing_byte_count", "?")),
         ("Ratio", f"{analysis.get('differing_ratio', 0.0):.4%}"),
         ("Cluster", len(analysis.get("clusters") or [])),
@@ -241,6 +300,55 @@ def cmd_save_diff(args) -> int:
 # ----------------------------------------------------------------------------
 # PE-Zugriff
 # ----------------------------------------------------------------------------
+def _public_error(exc: BaseException) -> str:
+    """Oeffentlicher Fehlertext — zentral, ohne lokale Dateipfade."""
+    from ssb_i.errors import public_error
+    return public_error(exc)
+
+
+def _cli_error_text(exc: CliError) -> str:
+    """Text eines ``CliError`` fuer die oeffentliche Ausgabe.
+
+    ``CliError``-Meldungen werden an der Raise-Stelle aus oeffentlichen Teilen
+    zusammengesetzt (``public_error`` plus der vom Nutzer aufgerufene
+    Dateiname). Sie hier erneut durch ``public_error`` zu schicken wuerde jede
+    Meldung auf ``CliError`` verkuerzen.
+    """
+    return str(exc)
+
+
+def _exit_code_of(exc: SystemExit) -> int:
+    """Exit-Code eines ``SystemExit`` — reine Pruefung, keine Ausgabe."""
+    code = exc.code
+    return code if isinstance(code, int) else EXIT_ERROR
+
+
+def _finish_error(message: str, use_json: bool, code: int = EXIT_ERROR) -> int:
+    """Gibt eine Fehlermeldung aus und liefert den Exit-Code.
+
+    R1_6 / F-6: ``message`` stammt ausschliesslich aus kontrollierten
+    Quellen — ``_cli_error_text(exc)``, ``_public_error(exc)`` oder
+    einem statischen Literal. Dateinamen und Pfade stehen nicht darin.
+    """
+    """Gibt einen Abbruch aus und liefert den Exit-Code.
+
+    Bei ``--json`` geht genau ein JSON-Dokument auf stdout (Feld ``error`` wie
+    in den Befund-Evidenzen des Berichts), sonst die bekannte ``ERROR:``-Zeile
+    auf stderr. Ein Traceback entsteht in keinem Fall.
+
+    Fehlt der Stream (PyInstaller ohne Konsolenfenster, ``sys.stdout``/
+    ``sys.stderr`` sind ``None``), wird ueber :func:`emit_error_line` der
+    Rueckfallweg benutzt. Gibt es **keinen** Kanal, wird nichts ausgegeben —
+    aber der Exit-Code bleibt der des Fehlers, ein stiller Fehler wird also
+    nicht als Erfolg gemeldet.
+    """
+    if use_json:
+        emit_json({"error": message, "exit_code": code})
+    else:
+        emit_error_line(f"ERROR: {message}")
+    return code
+
+
 def _load_pe(path: str):
     from ssb_i.ssb_pe_lib import PE, PEIntegrityError
 
@@ -248,23 +356,48 @@ def _load_pe(path: str):
     try:
         return PE(src)
     except PEIntegrityError as exc:
-        raise CliError(f"{src.name}: not a valid PE32+ image: {exc}") from exc
+        # R1_6 / F-6: kein Dateiname in der oeffentlichen Fehlerzeile.
+        raise CliError(f"not a valid PE32+ image: {_public_error(exc)}") from exc
     except OSError as exc:
-        raise CliError(f"{src.name}: not readable: {exc}") from exc
+        raise CliError(f"binary not readable: {_public_error(exc)}") from exc
 
 
 def cmd_save_verify(args) -> int:
-    from ssb_i.save_integrity import FAILED, format_text, run_all
+    from ssb_i.save_integrity import (FAILED, collect_sequence, format_text,
+                                      format_sequence_summary, run_all)
 
     src = _require_file(args.save, "Savegame")
+
+    # I-14 braucht Vergleichsdaten. collect_sequence() waehlt die Saves im
+    # Verzeichnis aus und gibt sie in Dateinamen-Reihenfolge zurueck; die
+    # chronologische Reihenfolge stellt erst check_i14_sequence() her, anhand
+    # des FileTime-Werts aus dem Header. mtime entscheidet nur darueber, welche
+    # Dateien bei mehr als 64 Saves ueberhaupt gelesen werden.
+    sequence: tuple = ()
+    if not args.no_sequence:
+        try:
+            sequence = collect_sequence(src, directory=args.sequence_dir)
+        except (OSError, ValueError) as exc:
+            print(f"Sequenz nicht sammelbar: {_public_error(exc)}",
+                  file=sys.stderr)
+            sequence = ()
+
     try:
-        report = run_all(src, data_dir=args.data_dir)
+        report = run_all(src, data_dir=args.data_dir, sequence=sequence)
     except (ValueError, OSError) as exc:
-        raise CliError(f"{src.name}: {type(exc).__name__}: {exc}") from exc
+        # R1_6 / F-6: kein Dateiname in der oeffentlichen Fehlerzeile.
+        raise CliError(f"integrity check failed: {_public_error(exc)}") from exc
     if args.json:
         emit_json(report.to_dict())
     else:
         print(format_text(report))
+        if args.no_sequence:
+            print("\nSequenz: abgeschaltet (--no-sequence), I-14 nicht geprueft.")
+        else:
+            print("\nSequenz: %d Save(s) einbezogen (chronologisch nach Header-FileTime)."
+                  % len(sequence))
+            for line in format_sequence_summary(report):
+                print(line)
     return EXIT_ERROR if report.total == FAILED else EXIT_OK
 
 
@@ -300,7 +433,8 @@ def cmd_pe_info(args) -> int:
 
     pe = _load_pe(args.binary)
     payload = {
-        "file": str(pe.path.resolve()),
+        # R1_6 / F-2: kein absoluter Pfad in oeffentlichen Ausgaben.
+        # Der SHA-256 identifiziert die Datei hinreichend.
         "sha256": pe.sha256,
         "image_base": hex(pe.image_base),
         "sections": [{"name": name, "rva": hex(va), "virtual_size": vsz, "raw_size": rsz}
@@ -337,7 +471,8 @@ def cmd_pe_sections(args) -> int:
     rows = [{"name": name, "rva": va, "virtual_size": vsz, "raw_size": rsz, "raw_offset": raw}
             for name, (va, vsz, rsz, raw) in pe.sec.items()]
     if args.json:
-        emit_json({"file": str(pe.path.resolve()), "sections": rows})
+        # R1_6 / F-2: kein absoluter Pfad in oeffentlichen Ausgaben.
+        emit_json({"sha256": pe.sha256, "sections": rows})
         return EXIT_OK
     print(f"{'Name':<10}{'RVA':>12}{'VSize':>12}{'RawSize':>12}{'RawOff':>12}")
     for r in rows:
@@ -349,8 +484,52 @@ def cmd_pe_sections(args) -> int:
 # ----------------------------------------------------------------------------
 # Parser
 # ----------------------------------------------------------------------------
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+class _QuietParser(argparse.ArgumentParser):
+    """``ArgumentParser``, der seinen Nutzungsfehler nicht selbst ausgibt.
+
+    ``argparse`` schreibt bei einem Aufruffehler den Usage-Text und die
+    Fehlermeldung **direkt auf stderr** und beendet sich mit ``SystemExit(2)``.
+    Im JSON-Modus ist genau ein JSON-Dokument auf stdout gewuenscht — zusaetz-
+    licher Text auf stderr wuerde den Vertrag brechen.
+
+    Dieser Parser unterdrueckt daher die Fehlerausgabe. Die Entscheidung
+    uebernimmt :func:`main`: sie erzeugt im JSON-Modus ein JSON-Dokument und
+    im Textmodus den gewoehnlichen argparse-Text.
+
+    Der Exit-Code bleibt unveraendert ``2``.
+    """
+
+    def error(self, message: str) -> None:          # type: ignore[override]
+        raise _UsageError(message, self)
+
+
+class _UsageError(Exception):
+    """Nutzungsfehler von argparse — ohne eigene Ausgabe."""
+
+    def __init__(self, message: str, parser: argparse.ArgumentParser) -> None:
+        super().__init__(message)
+        self.message = message
+        self.parser = parser
+
+
+def _build_parser_class(json_mode: bool):
+    """Parserklasse waehlen — im JSON-Modus ohne eigene Fehlerausgabe."""
+    if json_mode:
+        return _QuietParser
+    return argparse.ArgumentParser
+
+
+def build_parser(json_mode: bool = False) -> argparse.ArgumentParser:
+    """Baut den Argumentparser.
+
+    ``json_mode`` schaltet die eigene Fehlerbehandlung ein: dann gibt der
+    Parser keine eigene Fehlermeldung aus, sondern ``main`` erzeugt genau ein
+    JSON-Dokument. Der Aufruf mit ``json_mode=True`` ist **ausschliesslich** fuer
+    den JSON-Modus bestimmt; im Textmodus bleibt das argparse-Verhalten
+    unveraendert.
+    """
+    parser_class = _build_parser_class(json_mode)
+    parser = parser_class(
         prog=CLI_PROG,
         description=(f"{PRODUCT_NAME} - {PRODUCT_SUBTITLE}. "
                  f"{DEVELOPER}. All operations are read-only."),
@@ -359,10 +538,12 @@ def build_parser() -> argparse.ArgumentParser:
                         version=f"{CLI_PROG} {VERSION} - {PRODUCT_NAME} ({DEVELOPER})")
     parser.add_argument("--json", action="store_true",
                         help="machine-readable JSON output on stdout")
-    sub = parser.add_subparsers(dest="group", required=True)
+    sub = parser.add_subparsers(dest="group", required=True,
+                                 parser_class=parser_class)
 
     save = sub.add_parser("save", help="inspect savegame files (.sfs)")
-    save_sub = save.add_subparsers(dest="command", required=True)
+    save_sub = save.add_subparsers(dest="command", required=True,
+                                    parser_class=parser_class)
 
     p_info = save_sub.add_parser("info", help="container, header and plugin counts")
     p_info.add_argument("save")
@@ -390,6 +571,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_verify.add_argument("save")
     p_verify.add_argument("--data-dir", metavar="DIR",
                           help="Data directory for the plugin dependency check (I-12)")
+    p_verify.add_argument("--sequence-dir", metavar="DIR",
+                          help="Directory to collect saves from for the sequence check "
+                               "(I-14). Default: the save's own directory.")
+    p_verify.add_argument("--no-sequence", action="store_true",
+                          help="Skip the sequence check (I-14 reports NOT_CHECKED).")
     p_verify.set_defaults(func=cmd_save_verify)
 
     p_strings = save_sub.add_parser("strings", help="read the body string pool (read-only)")
@@ -401,7 +587,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_strings.set_defaults(func=cmd_save_strings)
 
     pe = sub.add_parser("pe", help="inspect PE32+ binaries (e.g. Starfield.exe)")
-    pe_sub = pe.add_subparsers(dest="command", required=True)
+    pe_sub = pe.add_subparsers(dest="command", required=True,
+                                parser_class=parser_class)
 
     p_pe_info = pe_sub.add_parser("info", help="header, sections, integrity")
     p_pe_info.add_argument("binary")
@@ -417,16 +604,65 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """CLI-Einstieg mit zentraler Fehlergrenze.
+
+    Jede unerwartete ``Exception`` (``struct.error``, ``ValueError``, ``OSError``
+    und alles andere) endet hier kontrolliert: oeffentlicher Text ueber
+    :func:`_public_error`, Exit-Code ``EXIT_ERROR``, bei ``--json`` genau ein
+    JSON-Dokument auf stdout. ``KeyboardInterrupt`` und ``SystemExit`` werden
+    nicht verschluckt.
+    """
+    raw_argv = list(sys.argv[1:]) if argv is None else list(argv)
+    # Vor dem Parsen bekannt: ein Nutzungsfehler soll bei --json ebenfalls JSON
+    # liefern, obwohl ``args`` dann noch nicht existiert.
+    wants_json = "--json" in raw_argv
+    if wants_json:
+        # Eigener Parser: er schreibt bei einem Nutzungsfehler **nichts** auf
+        # stderr. Der Fehler kommt als JSON-Dokument auf stdout, sonst wuerde
+        # der JSON-Vertrag durch zusaetzlichen Text gebrochen.
+        parser = build_parser(json_mode=True)
+        try:
+            args = parser.parse_args(raw_argv)
+        except _UsageError as exc:
+            # Nutzungsfehler: genau ein JSON-Dokument, kein stderr-Text.
+            emit_json({"error": "invalid command line", "exit_code": EXIT_USAGE})
+            return EXIT_USAGE
+        except SystemExit as exc:              # argparse: --help/--version
+            # Exit 0 (--help/--version): keine Fehlerausgabe, der Exit-Wunsch
+            # von argparse bleibt unveraendert.
+            return _exit_code_of(exc)
+        use_json = bool(getattr(args, "json", False))
+        try:
+            return args.func(args)
+        except CliError as exc:
+            return _finish_error(_cli_error_text(exc), use_json)
+        except KeyboardInterrupt:
+            return _finish_error("Aborted.", use_json)
+        except Exception as exc:                           # noqa: BLE001
+            return _finish_error(_public_error(exc), use_json)
+
     parser = build_parser()
-    args = parser.parse_args(argv)
+    try:
+        args = parser.parse_args(raw_argv)
+    except SystemExit as exc:                  # argparse: --help/--version/Fehler
+        code = _exit_code_of(exc)
+        if code and wants_json:
+            emit_json({"error": "invalid command line", "exit_code": code})
+        raise                                  # Exit-Wunsch von argparse bleibt
+    use_json = bool(getattr(args, "json", False))
     try:
         return args.func(args)
     except CliError as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
-        return EXIT_ERROR
+        # CliError-Texte werden bereits beim Bau aus oeffentlichen Teilen
+        # zusammengesetzt (public_error + Dateiname) und hier unveraendert
+        # ausgegeben.
+        return _finish_error(_cli_error_text(exc), use_json)
     except KeyboardInterrupt:
-        print("Aborted.", file=sys.stderr)
-        return EXIT_ERROR
+        return _finish_error("Aborted.", use_json)
+    except Exception as exc:                               # noqa: BLE001
+        # Zentrale Fehlergrenze: kein Traceback, kein interner Text, aber die
+        # Fehlerklasse bleibt sichtbar.
+        return _finish_error(_public_error(exc), use_json)
 
 
 if __name__ == "__main__":

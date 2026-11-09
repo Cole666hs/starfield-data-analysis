@@ -231,3 +231,45 @@ def test_savegame_page_integrity_matches_cli(synthetic_save):
     assert result.returncode in (0, 1), result.stderr
     cli_total = json.loads(result.stdout)["total"]
     assert cli_total == page.integrity_report.total
+
+
+def test_savegame_page_i14_matches_cli(tmp_path):
+    """UI und CLI ziehen dieselbe Sequenz: I-14 muss in beiden bewertet sein."""
+    import json
+    import shutil
+    import subprocess
+    import sys as _sys
+    from pathlib import Path as _Path
+
+    from conftest import find_real_saves
+    from ssb_ui.pages.savegame_page import SavegamePage
+
+    saves = find_real_saves()
+    if not saves:
+        import pytest
+        pytest.skip("keine realen Saves")
+
+    # Kopie in ein eigenes Verzeichnis, damit die Sequenz nur diese Saves sieht.
+    for path in saves[:2]:
+        shutil.copy2(path, tmp_path / path.name)
+    target = tmp_path / saves[0].name
+
+    page = SavegamePage()
+    assert page.load_file(str(target), show_dialog=False) is True
+    i14 = page.integrity_report.by_id("I-14")
+    assert i14 is not None and i14.status == "PASS", i14
+    assert "Sequenz: 2 Save(s)" in page.integrity_view.toPlainText()
+    # L3: die Auswahl selbst ist in der Oberflaeche sichtbar, nicht nur die Zahl.
+    text = page.integrity_view.toPlainText()
+    assert "Sequenzauswahl: 2 Datei(en) im Verzeichnis" in text
+    assert "Rumpfpruefung:" in text
+
+    repo = _Path(__file__).resolve().parents[1]
+    result = subprocess.run(
+        [_sys.executable, str(repo / "sfda_cli.py"), "--json", "save", "verify",
+         str(target)],
+        capture_output=True, text=True, cwd=str(repo), timeout=300)
+    cli = json.loads(result.stdout)
+    cli_i14 = next(c for c in cli["checks"] if c["check_id"] == "I-14")
+    assert cli_i14["status"] == i14.status
+    assert cli["coverage"]["assessed"] == page.integrity_report.coverage["assessed"]

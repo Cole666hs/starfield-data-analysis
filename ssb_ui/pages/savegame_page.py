@@ -3,12 +3,14 @@
 Layout:
 +---------------------------------------------------------------+
 | [Open .sfs...] [Run Diff vs another save] [Save Report] |
-+---------------------------------------------------------------+
-| Player Info Card   | Container Metadata     | Plugins       |
-| DANTE              | chunk_count=40         | Starfield.esm |
-| L100               | uncompressed=10.3MB    | BlueprintShips|
-| v1.7.23            | padding=16             | Constellation |
-+---------------------------------------------------------------+
++---------------------------+-------------------+---------------+
+| Player Info Card (O-6)    |                   | Plugins       |
+| alle Headerfelder, zwei-  |                   | Starfield.esm |
+| spaltig: PLAYER | SAVE    |                   | BlueprintShips|
++---------------------------+-------------------+ Constellation |
+| BCPS Container            |                   |               |
+| chunk_count=40 padding=16 |                   |               |
++---------------------------+-------------------+---------------+
 | Header text (pretty-printed from SFS_SAVEGAME parse)            |
 |                                                              |
 +---------------------------------------------------------------+
@@ -17,6 +19,9 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+
+from ssb_i.errors import public_error
+from ssb_i.savegame_provider import player_view_text, public_header_view
 
 from PySide6.QtCore import Qt, QByteArray
 from PySide6.QtGui import QFont, QColor
@@ -122,13 +127,38 @@ class SavegamePage(QWidget):
         grid = QGridLayout()
         grid.setSpacing(12)
 
-        # Card 1: Player
+        # Card 1: Player — vollstaendige Spielerinformation (O-6).
+        # Seit O-6 zeigt die Karte den gesamten dekodierten Header, nicht mehr
+        # vier Zeilen. Deshalb ein eigener, schreibgeschuetzter Textbereich
+        # (Monospace, kein Umbruch) statt eines umbrechenden Labels: die
+        # Punkt-Ausrichtung bleibt so erhalten, und der Nutzer kann die
+        # Angaben markieren und kopieren.
         self.player_card = CyberPanel("Player")
-        self.player_label = QLabel("—")
-        self.player_label.setStyleSheet(f"color: {TEXT_MAIN}; font-family: 'Cascadia Code'; font-size: 10pt;")
-        self.player_label.setWordWrap(True)
-        self.player_card.add_widget(self.player_label)
-        grid.addWidget(self.player_card, 0, 0)
+        self.player_view = QPlainTextEdit()
+        self.player_view.setReadOnly(True)
+        self.player_view.setLineWrapMode(QPlainTextEdit.NoWrap)
+        self.player_view.setFrameShape(QFrame.NoFrame)
+        self.player_view.setPlainText("—")
+        # Monospace ist hier **fachlich** noetig: die zweispaltige Ansicht
+        # richtet ihre Werte ueber Punktfuellung aus. Ein reiner
+        # Stylesheet-Fontname genuegt nicht — fehlt die Familie, faellt Qt auf
+        # eine proportionale Schrift zurueck und die Spalten verschieben sich
+        # (gemessen: 'Cascadia Code' ist nicht auf jeder Plattform installiert).
+        # Der Style-Hint laesst Qt eine Monospace-Schrift der Plattform waehlen.
+        player_font = QFont("Cascadia Code")
+        player_font.setStyleHint(QFont.Monospace)
+        player_font.setPointSize(10)
+        self.player_view.setFont(player_font)
+        self.player_view.setStyleSheet(
+            f"QPlainTextEdit {{ background-color: {PANEL_BG}; color: {TEXT_MAIN};"
+            f" border: none; selection-background-color: {ACCENT_CYAN};"
+            f" selection-color: {DARK_BG}; }}")
+        self.player_view.setMinimumHeight(232)
+        self.player_card.add_widget(self.player_view)
+        grid.addWidget(self.player_card, 0, 0, 1, 3)
+        grid.setColumnStretch(0, 1)
+        grid.setColumnStretch(1, 1)
+        grid.setColumnStretch(2, 1)
 
         # Card 2: Container metadata
         self.container_card = CyberPanel("BCPS Container")
@@ -136,7 +166,11 @@ class SavegamePage(QWidget):
         self.container_label.setStyleSheet(f"color: {TEXT_MAIN}; font-family: 'Cascadia Code'; font-size: 10pt;")
         self.container_label.setWordWrap(True)
         self.container_card.add_widget(self.container_label)
-        grid.addWidget(self.container_card, 0, 1)
+        # Die Karte teilt sich die Zeile mit der Plugin-Liste und wird dabei
+        # gestreckt. Ohne den Stretch zentriert Qt den Inhalt senkrecht und
+        # die Ueberschrift rutscht nach unten.
+        self.container_card.body_layout.addStretch(1)
+        grid.addWidget(self.container_card, 1, 0, 1, 1)
 
         # Card 3: Plugins
         self.plugins_card = CyberPanel("Plugins")
@@ -165,7 +199,7 @@ class SavegamePage(QWidget):
         self.plugins_count_label.setWordWrap(True)
         self.plugins_card.add_widget(self.plugins_count_label)
         self.plugins_card.add_widget(self.plugins_tree)
-        grid.addWidget(self.plugins_card, 0, 2)
+        grid.addWidget(self.plugins_card, 1, 1, 1, 2)
 
         grid.setColumnStretch(0, 1)
         grid.setColumnStretch(1, 1)
@@ -319,7 +353,7 @@ class SavegamePage(QWidget):
             header = provider.parse_dat_header(decomp)
             info = provider.parse_plugin_info(decomp, header)
         except Exception as e:
-            self.last_error = "%s: %s" % (type(e).__name__, e)
+            self.last_error = public_error(e)
             # Alten Zustand verwerfen: sonst zeigt die Oberfläche (und die
             # Hex-Ansicht) weiter die Bytes des vorherigen Saves.
             self.current_path = None
@@ -328,11 +362,10 @@ class SavegamePage(QWidget):
             self.plugins = None
             self.status_label.setText(
                 f"<span style='color:{ACCENT_PINK}'>● Decode failed</span> "
-                f"<span style='color:{TEXT_MAIN}'>{Path(path).name}</span> "
-                f"<span style='color:{TEXT_DIM}'>{e}</span>"
+                f"<span style='color:{TEXT_DIM}'>{public_error(e)}</span>"
             )
             if show_dialog:
-                QMessageBox.critical(self, "Decode failed", str(e))
+                QMessageBox.critical(self, "Decode failed", public_error(e))
             return False
 
         self.current_path = path
@@ -341,7 +374,7 @@ class SavegamePage(QWidget):
         self.plugins = info
 
         # Populate cards
-        self.player_label.setText(self._format_player(header))
+        self.player_view.setPlainText(self._format_player(header))
         self.container_label.setText(self._format_container(container))
 
         self.plugins_tree.clear()
@@ -376,8 +409,8 @@ class SavegamePage(QWidget):
             self.string_pool = provider.read_string_pool(decomp, header, info)
         except Exception as exc:                               # noqa: BLE001
             self.string_pool = None
-            self.strings_summary.setText("String pool not readable: %s: %s"
-                                         % (type(exc).__name__, exc))
+            self.strings_summary.setText("String pool not readable: %s"
+                                         % public_error(exc))
         else:
             pool = self.string_pool
             self.strings_summary.setText(
@@ -393,9 +426,10 @@ class SavegamePage(QWidget):
 
         # Status
         size_mb = len(self.decompressed or b"") / 1024 / 1024
+        # R1_6 / O-9: die Statuszeile nennt keinen Dateinamen und keinen
+        # Pfad mehr.
         self.status_label.setText(
             f"<span style='color:{ACCENT_GREEN}'>● Loaded</span> "
-            f"<span style='color:{TEXT_MAIN}'>{Path(path).name}</span> "
             f"<span style='color:{TEXT_DIM}'>({size_mb:.2f} MB decompressed · {container.chunk_count} chunks)</span>"
         )
         return True
@@ -406,14 +440,26 @@ class SavegamePage(QWidget):
         UNKNOWN und NOT_CHECKED werden ausdruecklich als *nicht bewertet*
         getrennt von Fehlern gefuehrt — ein fehlender Befund ist kein PASS.
         """
-        from ssb_i.save_integrity import FAILED, WARNING, run_all
+        from ssb_i.save_integrity import (FAILED, WARNING, collect_sequence,
+                                          format_sequence_summary, run_all)
+
+        # Dieselbe Sequenz wie in der CLI: Saves aus dem Verzeichnis der
+        # geladenen Datei. collect_sequence() waehlt nur aus und liefert in
+        # Dateinamen-Reihenfolge; die chronologische Ordnung nach
+        # Header-FileTime entsteht in check_i14_sequence(). Ohne diesen
+        # Schritt zeigte die Oberflaeche fuer I-14 NOT_CHECKED, waehrend die
+        # CLI PASS meldet.
+        try:
+            sequence = collect_sequence(path)
+        except Exception:                                      # noqa: BLE001
+            sequence = ()
 
         try:
-            report = run_all(path)
+            report = run_all(path, sequence=sequence)
         except Exception as exc:                               # noqa: BLE001
             self.integrity_report = None
             self.integrity_view.setPlainText(
-                "Integrity check not runnable: %s: %s" % (type(exc).__name__, exc))
+                "Integrity check not runnable: %s" % public_error(exc))
             return
         self.integrity_report = report
         coverage = report.coverage
@@ -440,6 +486,9 @@ class SavegamePage(QWidget):
             for gap in report.gaps:
                 lines.append("%-4s %-12s %s" % (gap.check_id, gap.status, gap.detail))
         lines.append("")
+        lines.append("Sequenz: %d Save(s) einbezogen (chronologisch nach Header-FileTime)."
+                     % len(sequence))
+        lines.extend(format_sequence_summary(report))
         lines.append("Hinweis: %s" % report.disclaimer)
         self.integrity_view.setPlainText("\n".join(lines))
 
@@ -467,13 +516,18 @@ class SavegamePage(QWidget):
     def current_buffer(self) -> tuple[str | None, bytes]:
         """Der zuletzt dekodierte Puffer für andere Ansichten (z. B. Hex).
 
-        Rückgabe: (Pfad oder None, Bytes). Beim Fehlschlag eines Dekodiervorgangs
-        wird der alte Puffer verworfen, damit keine veralteten Bytes als aktuell
-        angezeigt werden.
+        Rückgabe: (Bezeichnung oder None, Bytes). Beim Fehlschlag eines
+        Dekodiervorgangs wird der alte Puffer verworfen, damit keine
+        veralteten Bytes als aktuell angezeigt werden.
+
+        R1_6 / F-2: die Bezeichnung ist **kein Pfad**. Der absolute
+        Savegame-Pfad (``self.current_path``) wird nicht weitergegeben —
+        er wuerde in der Hex-Viewer-Infozeile erscheinen. Es genuegt
+        die Angabe, dass es sich um einen Save-Puffer handelt.
         """
         if self.last_error:
             return None, b""
-        return self.current_path, (self.decompressed or b"")
+        return ("save", self.decompressed or b"")
 
     def on_diff(self):
         if not self.current_path:
@@ -490,12 +544,13 @@ class SavegamePage(QWidget):
         try:
             result = provider.diff_saves(self.current_path, path, max_diff=500)
         except Exception as e:
-            QMessageBox.critical(self, "Diff failed", str(e))
+            QMessageBox.critical(self, "Diff failed", public_error(e))
             return
 
         # Format
+        # R1_6 / F-2: keine Savegame-Dateinamen in der Diff-Ansicht.
         lines = [
-            f"=== DIFF {Path(self.current_path).name}  vs  {Path(path).name} ===",
+            "=== DIFF A  vs  B ===",
             f"Size A: {result['a_size']:,}   Size B: {result['b_size']:,}",
             f"Differing bytes (first 500): {result['diffs_count']}",
             "",
@@ -519,31 +574,38 @@ class SavegamePage(QWidget):
         if not path:
             return
         report = {
-            "path": self.current_path,
+            # R1_6 / F-2: kein Pfad im Export. Der Dateiname des Exports
+            # wird auch nicht in den Inhalt geschrieben.
             "decompressed_size": len(self.decompressed),
-            "header": self.header.to_dict(),
+            # R1_6: nur die kontrollierte oeffentliche Headeransicht —
+            # asdict(self.header) waere die vollstaendige interne
+            # Repräsentation inkl. Spielername.
+            "header": public_header_view(self.header),
             "plugins": self.plugins.to_dict(),
         }
         Path(path).write_text(json.dumps(report, indent=2))
-        QMessageBox.information(self, "Saved", f"Report written to:\n{path}")
+        # R1_6 / F-2: der Dialog nennt keinen Pfad — weder absolut noch
+        # als Dateiname. Die Meldung bleibt verstaendlich.
+        QMessageBox.information(self, "Saved",
+                                "Report written to the selected file.")
 
     # -----------------------------------------------------------------
     # Formatters
     # -----------------------------------------------------------------
     def _format_player(self, h) -> str:
-        return (
-            f"Name:           {h.player_name}\n"
-            f"Level:          {h.player_level}\n"
-            f"Location:       {h.player_location}\n"
-            f"Race:           {h.race_name}\n"
-            f"Gender:         {h.gender}\n"
-            f"Experience:     {h.experience:.2f} / {h.experience_required:.2f}\n"
-            f"Playtime:       {h.playtime}\n"
-            f"Game version:   {h.current_game_version}\n"
-            f"Save version:   {h.save_version} / {h.save_version_2}\n"
-            f"Engine:         0x{h.engine_version:08X}\n"
-            f"Save number:    {h.save_number}"
-        )
+        """Vollstaendige Spielerinformation (O-6).
+
+        Das ist der **ausdruecklich angeforderte** Analysepfad: der Nutzer
+        oeffnet ein Savegame, um dessen Inhalt zu sehen. Deshalb zeigt diese
+        Ansicht jedes dekodierte Headerfeld — Name, Location, Playtime, Race,
+        Level und alle weiteren. Die Auswahl und Reihenfolge steht in
+        ``PLAYER_VIEW_FIELDS``; diese Methode formatiert nur noch.
+
+        Die Privacy-Grenze bleibt davon unberuehrt: Diagnose-, Fehler- und
+        Statusausgaben (Statuszeile, Header-Dump, Export, CLI) nutzen
+        weiterhin ``public_header_view()``.
+        """
+        return player_view_text(h, columns=2)
 
     def _format_container(self, c) -> str:
         return (
@@ -556,7 +618,10 @@ class SavegamePage(QWidget):
         )
 
     def _format_header_full(self, h) -> str:
-        d = h.to_dict()
+        # R1_6: der Header-Dump ist eine Diagnoseansicht — er nutzt die
+        # kontrollierte oeffentliche Headeransicht, nicht asdict(h).
+        # Das Spielfeld (_format_player) bleibt davon unberuehrt (O-6).
+        d = public_header_view(h)
         lines = []
         for k, v in d.items():
             lines.append(f"{k:.<26} {v}")

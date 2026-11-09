@@ -7,13 +7,15 @@ attachments from byte patterns.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
-from .savegame_provider import DatHeader, PluginInfo, SfsDecodeProvider
+from .savegame_provider import (DatHeader, PluginInfo, SfsDecodeProvider,
+                                public_header_view)
 
 PROVEN = "PROVEN"
 STRONG = "STRONG EVIDENCE"
@@ -60,6 +62,20 @@ def cluster_offsets(offsets: Iterable[int], *, max_gap: int = 0) -> list[DiffClu
     return clusters
 
 
+#: Headerfelder mit Spieleridentitaet (R1_6).
+#:
+#: Sie werden im Vergleich weiterhin bewertet — der Gleichheits-Befund
+#: bleibt unveraendert — aber ihr **Wert** wird nicht oeffentlich
+#: ausgegeben. Das gilt fuer die JSON-Ausgabe des Diffs ebenso wie fuer
+#: die daraus abgeleiteten Markdown-Berichte.
+IDENTITY_FIELDS = frozenset({
+    "player_name",
+    "player_location",
+    "playtime",
+    "race_name",
+})
+
+
 def _header_fields(header: DatHeader) -> dict[str, Any]:
     return {
         "current_game_version": header.current_game_version,
@@ -99,6 +115,14 @@ def compare_metadata(
     fields_a, fields_b = _header_fields(header_a), _header_fields(header_b)
     for field in fields_a:
         equal = fields_a[field] == fields_b[field]
+        # R1_6: Felder mit Spielidentitaet duerfen nicht oeffentlich
+        # ausgegeben werden. Die Vergleichssemantik bleibt erhalten: es
+        # bleibt ein Gleichheits-Befund, nur ohne den Wert selbst.
+        # Betrifft: player_name, player_location, playtime, race_name.
+        if field in IDENTITY_FIELDS:
+            checks[field] = {"equal": equal,
+                             "classification": PROVEN if equal else DISPROVEN}
+            continue
         checks[field] = {"equal": equal, "a": fields_a[field], "b": fields_b[field],
                          "classification": PROVEN if equal else DISPROVEN}
     plugin_equal = _plugin_key(plugins_a) == _plugin_key(plugins_b)
@@ -205,9 +229,14 @@ def analyze_paths(path_a: str | Path, path_b: str | Path, *, known_formid_paths:
     header_b, plugins_b = _parse_header_and_plugins(provider, raw_b)
     metadata = compare_metadata(container_a, container_b, header_a, header_b, plugins_a, plugins_b)
     result = {"read_only": True, "classification_vocabulary": [PROVEN, STRONG, PLAUSIBLE, UNKNOWN, DISPROVEN],
-        "inputs": {"a": str(path_a), "b": str(path_b)},
+        # R1_6 / F-2: keine Pfade und keine Dateinamen in oeffentlichen
+        # Ausgaben. Die SHA-256 der Payloads identifizieren die Eingaben.
+        "inputs": {"a_sha256": hashlib.sha256(raw_a).hexdigest(),
+                   "b_sha256": hashlib.sha256(raw_b).hexdigest()},
         "containers": {"a": container_a, "b": container_b},
-        "headers": {"a": header_a.to_dict(), "b": header_b.to_dict()},
+        # R1_6: nur die kontrollierte oeffentliche Headeransicht.
+        "headers": {"a": public_header_view(header_a),
+                    "b": public_header_view(header_b)},
         "metadata_comparison": metadata,
         "analysis": analyze_bytes(raw_a, raw_b, known_formids=load_known_formids(known_formid_paths),
                                   max_gap=max_gap, unsuitable_diff_ratio=unsuitable_diff_ratio)}
@@ -225,10 +254,12 @@ def analyze_paths(path_a: str | Path, path_b: str | Path, *, known_formid_paths:
 
 def markdown_report(report: Mapping[str, Any]) -> str:
     analysis = report["analysis"]
+    # R1_6 / F-2: die Eingaben werden ueber ihre SHA-256 bezeichnet, nicht
+    # ueber Pfad oder Dateiname.
     lines = ["# SSB-I Savegame Differential Report", "", "**READ-ONLY:** yes",
              f"**RESULT:** `{report['result']}`", f"**REASON:** {report['reason']}", "",
-             "## Inputs", f"- Save A: `{report['inputs']['a']}`",
-             f"- Save B: `{report['inputs']['b']}`", "", "## Metadata check"]
+             "## Inputs", f"- Save A sha256: `{report['inputs']['a_sha256']}`",
+             f"- Save B sha256: `{report['inputs']['b_sha256']}`", "", "## Metadata check"]
     for name, check in report["metadata_comparison"]["checks"].items():
         lines.append(f"- `{name}`: {'equal' if check['equal'] else 'different'} — `{check['classification']}`")
     lines += ["", "## Difference",

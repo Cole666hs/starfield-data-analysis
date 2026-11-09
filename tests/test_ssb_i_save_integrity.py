@@ -38,7 +38,9 @@ def test_intact_synthetic_save_assesses_cleanly(synthetic_save: Path):
     # Padding-Raster aus, wodurch ein Alignment-Rest entsteht (wie bei realen
     # Saves mit 12 Fuellbytes vor dem Datenstrom).
     assert report.statuses["I-03"] in (PASS, WARNING)
-    assert report.statuses["I-09"] == UNKNOWN
+    # Seit 1.5.3 ist I-09 belegt (headerSize == padding_end - 16): auf einem
+    # formatkonformen Header also PASS, nicht mehr UNKNOWN.
+    assert report.statuses["I-09"] == PASS
 
 
 def test_report_exposes_gaps_separately(synthetic_save: Path):
@@ -47,9 +49,10 @@ def test_report_exposes_gaps_separately(synthetic_save: Path):
     assert report.total in (PASS, WARNING)
     assert report.statuses["I-12"] == NOT_CHECKED      # kein --data-dir
     assert report.statuses["I-13"] == NOT_CHECKED      # FormID dauerhaft offen
-    assert report.statuses["I-14"] == NOT_CHECKED      # keine Sequenz
-    assert {g.check_id for g in report.gaps} == {"I-09", "I-12", "I-13", "I-14"}
-    assert report.coverage["assessed"] == 10
+    assert report.statuses["I-14"] == NOT_CHECKED      # keine Sequenz uebergeben
+    # I-09 ist seit 1.5.3 bewertet und damit kein Gap mehr.
+    assert {g.check_id for g in report.gaps} == {"I-12", "I-13", "I-14"}
+    assert report.coverage["assessed"] == 11
     assert report.coverage["total"] == 14
 
 
@@ -57,9 +60,25 @@ def test_disclaimer_present(synthetic_save: Path):
     assert "NICHT, dass Starfield den Spielstand laden kann" in run_all(synthetic_save).disclaimer
 
 
-def test_unknown_is_not_converted_to_pass(synthetic_save: Path):
-    """I-09 bleibt UNKNOWN — niemals PASS, solange die Semantik fehlt."""
-    assert _statuses(synthetic_save)["I-09"] == UNKNOWN
+def test_i09_passes_only_with_matching_formula(synthetic_save: Path, tmp_path):
+    """I-09 ist seit 1.5.3 belegt — aber nur PASS bei exakter Formel.
+
+    Der frühere Schutz lautete „I-09 bleibt UNKNOWN". Er ist abgelöst, weil die
+    Semantik an sechs realen Saves und an synthetisch variierenden Feldlängen
+    belegt ist. Der Schutz gegen ein unbegründetes PASS lebt weiter: eine
+    Abweichung ergibt FAILED, nicht PASS.
+    """
+    from conftest import build_dat_payload, build_synthetic_sfs, expected_header_size
+
+    assert _statuses(synthetic_save)["I-09"] == PASS
+
+    name, loc, play, race = "TestPilot", "Jemison - New Atlantis", \
+        "1d.2h.3m.1 Tag.2 Stunden.3 Minuten", "HumanRace"
+    broken = tmp_path / "broken_header_size.sfs"
+    broken.write_bytes(build_synthetic_sfs(build_dat_payload(
+        player_name=name, player_location=loc, playtime=play, race_name=race,
+        header_size_field=expected_header_size(name, loc, play, race) + 3)))
+    assert _statuses(broken)["I-09"] == FAILED
 
 
 # ---------------------------------------------------------------------------
@@ -315,7 +334,12 @@ def test_i12_reports_missing_plugins(tmp_path, synthetic_save):
     assert i12 is not None
     evidence = i12.evidence
     assert evidence["missing_count"] >= 1
-    assert "SFSE.esm" in evidence["missing"]
+    # R1_6 / F-2 / F-3: oeffentlich nur die Anzahl. Die Namen der
+    # fehlenden Plugins und der Data-Verzeichnispfad bleiben intern.
+    assert "missing" not in evidence
+    assert "data_dir" not in evidence
+    assert "SFSE.esm" in i12.internal["missing"]
+    assert str(data_dir) in i12.internal["data_dir"]
     assert _statuses(synthetic_save)["I-12"] == NOT_CHECKED   # ohne --data-dir
 
 

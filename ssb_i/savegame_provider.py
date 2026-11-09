@@ -8,8 +8,8 @@ Provenance: all operations are READ-ONLY over local .sfs files.
 """
 from __future__ import annotations
 
-import os, struct, zlib, json
-from dataclasses import dataclass, field, asdict
+import datetime, os, struct, zlib, json, hashlib
+from dataclasses import dataclass, field, asdict, fields
 from typing import Any, BinaryIO, Iterable, Mapping
 
 
@@ -54,6 +54,78 @@ class SfsContainer:
         }
 
 
+#: Ende des BCPS-Kopfes: 4 Byte Magic + 11 Felder bis zum Kompressionstag.
+CONTAINER_HEADER_END = 72
+
+
+class SfsHeaderError(ValueError):
+    """Der BCPS-Container ist lesbar, der ``SFS_SAVEGAME``-Header aber nicht.
+
+    Abgrenzung zu einem strukturell ungueltigen Container: hier ist der
+    Rahmen in Ordnung (Magic, Kompression, Chunk-Tabelle, Geometrie), der
+    innere Save-Header laesst sich aber nicht vollstaendig dekodieren. Diese
+    Trennung ist fuer die Sequenzermittlung wichtig, weil sie im Bericht als
+    eigener Verwerfungsgrund erscheint — eine fehlende Headerangabe ist kein
+    Beweis fuer eine beschaedigte Datei.
+    """
+
+
+@dataclass(frozen=True)
+class ContainerLayout:
+    """Rohe Felder des BCPS-Kopfes an ihren belegten Offsets.
+
+    Ein einziger Offset-Durchlauf fuer alle Leser (``read_container``,
+    ``decompress``, ``read_chunk_table``, ``read_header``). Vorher lief
+    derselbe Durchlauf dreimal getrennt — eine Aenderung am Layout haette
+    drei Stellen nachgezogen werden muessen.
+    """
+    version0: int
+    chunk_sizes_offset: int
+    compressed_offset: int
+    uncompressed_size: int
+    chunk_size_pre: int
+    padding_size: int
+    compression: bytes
+
+    @property
+    def chunk_count(self) -> int:
+        """Anzahl der Chunks laut deklarierter Nutzgroesse."""
+        if not self.chunk_size_pre:
+            return 0
+        return (self.uncompressed_size + self.chunk_size_pre - 1) // self.chunk_size_pre
+
+    def padded(self, size: int) -> int:
+        """Groesse eines Chunks im Datenstrom (komprimiert, auf Padding gerundet)."""
+        if not self.padding_size:
+            return size
+        return (size + self.padding_size - 1) & ~(self.padding_size - 1)
+
+
+def _layout_from(data: bytes) -> ContainerLayout:
+    """Liest die BCPS-Kopffelder. ``data`` muss ab Offset 0 beginnen."""
+    off = 4
+    version0, = struct.unpack_from("<i", data, off); off += 4            # +4
+    chunk_sizes_offset, = struct.unpack_from("<q", data, off); off += 8   # +8
+    off += 8                                                            # +16 unknown0
+    compressed_offset, = struct.unpack_from("<q", data, off); off += 8    # +24
+    uncompressed_size, = struct.unpack_from("<q", data, off); off += 8    # +32
+    off += 4                                                            # +40 version1
+    off += 4                                                            # +44 unknown1
+    chunk_size_pre, = struct.unpack_from("<q", data, off); off += 8       # +48
+    padding_size, = struct.unpack_from("<q", data, off); off += 8         # +56
+    off += 4                                                            # +64 unknown2
+    compression = data[off:off + 4]                                      # +68
+    return ContainerLayout(
+        version0=version0,
+        chunk_sizes_offset=chunk_sizes_offset,
+        compressed_offset=compressed_offset,
+        uncompressed_size=uncompressed_size,
+        chunk_size_pre=chunk_size_pre,
+        padding_size=padding_size,
+        compression=compression,
+    )
+
+
 @dataclass
 class DatHeader:
     """Decoded SFS_SAVEGAME header."""
@@ -75,9 +147,307 @@ class DatHeader:
     created_game_version: str
     plugin_info_offset: int
     plugin_info_size: int
+    #: Offset direkt HINTER dem 8-Byte-Padding-Feld (2026-11-08 belegt).
+    #: ``header_size`` zaehlt genau den Bereich 0x10 .. ``padding_end``.
+    #: ``None``, wenn der Header nicht bis dorthin dekodiert werden konnte.
+    padding_end: int | None = None
+    #: Beginn des von ``header_size`` gezaehlten Bereichs (12 Byte Magic +
+    #: 4 Byte Groessenfeld). Formatkonstante, keine Messung.
+    header_count_start: int = 16
+    #: Das u32-Feld direkt hinter ``filetime``. Der Parser liest es seit
+    #: Beginn, fuehrt es aber erst seit O-6 im Datensatz — vorher wurde der
+    #: Wert stillschweigend verworfen. **Bedeutung nicht belegt:** in allen
+    #: neun Messsaves standing 0. Es wird deshalb nur als Rohwert
+    #: ausgewiesen, nie als bekannter Spielerwert.
+    unknown_field_0: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+#: Oeffentliche Headerfelder — **explizite Allowlist** (R1_6).
+#:
+#: Grund: ``DatHeader.to_dict()`` ist ``asdict(self)`` und damit die
+#: vollstaendige interne Repräsentation. Sie enthaelt ``player_name``,
+#: ``player_location``, ``race_name`` und ``playtime`` — echte Spieler-
+#: identitaet. Wird sie ungeprueft als oeffentliche Ansicht verwendet
+#: (CLI ``save header --json``, CLI ``save info``, GUI-Header-Dump,
+#: GUI-Export), tritt die Identitaet in vier Ausgabekanaeln aus.
+#:
+#: Diese Liste ist die **einzige** Quelle oeffentlicher Headerfelder.
+#: Ein neues Feld in ``DatHeader`` wird damit NICHT automatisch
+#: oeffentlich — es muss hier ausdruecklich aufgenommen werden.
+#:
+#: Bewusst NICHT oeffentlich: ``player_name`` (Spielername),
+#: ``player_location``, ``race_name``, ``playtime``.
+PUBLIC_HEADER_FIELDS = (
+    "engine_version",
+    "save_version",
+    "save_number",
+    "player_level",
+    "gender",
+    "experience",
+    "experience_required",
+    "filetime",
+    "save_version_2",
+    "current_game_version",
+    "created_game_version",
+    "plugin_info_offset",
+    "plugin_info_size",
+)
+
+
+def public_header_view(header: DatHeader) -> dict[str, Any]:
+    """Oeffentliche Ansicht eines Save-Headers — ohne Spieleridentitaet.
+
+    Das ist die **einzige** zulaessige Quelle fuer Headerdaten in
+    oeffentlichen Ausgaben (CLI-JSON, CLI-Text, GUI, Export).
+
+    Es wird bewusst **nicht** ``asdict(header)`` verwendet: nur die in
+    :data:`PUBLIC_HEADER_FIELDS` gelisteten Felder werden uebernommen.
+    Ein spaeter ergaenztes ``DatHeader``-Feld wird dadurch nicht
+    automatisch oeffentlich.
+
+    Nur Felder aus der Allowlist und nur mit einfachen, JSON-sicheren
+    Werten. Unerwartete Typen werden uebergangen, nicht konvertiert.
+    """
+    out: dict[str, Any] = {}
+    for name in PUBLIC_HEADER_FIELDS:
+        if not hasattr(header, name):
+            continue
+        value = getattr(header, name)
+        if value is None or isinstance(value, (bool, int, float, str)):
+            out[name] = value
+    return out
+
+
+# =============================================================================
+# Spieleransicht (O-6) — vollstaendige Auswertung des Savegame-Headers
+# =============================================================================
+#: Marker fuer Werte, die der Save nicht hergibt. Sie werden ausgeschrieben
+#: statt durch einen Platzhalterwert ersetzt, damit "fehlt" nicht wie "0"
+#: oder wie ein leerer String aussieht.
+PLAYER_VIEW_MISSING = "(nicht im Save vorhanden)"
+PLAYER_VIEW_EMPTY = "(leer)"
+PLAYER_VIEW_UNASSIGNED = "(nicht zugeordnet)"
+
+_FILETIME_EPOCH = datetime.datetime(1601, 1, 1, tzinfo=datetime.timezone.utc)
+
+
+@dataclass(frozen=True)
+class PlayerField:
+    """Ein Feld der Spieleransicht: Header-Attribut, Beschriftung, Format.
+
+    ``kind`` steuert ausschliesslich die *Darstellung* — nie die Deutung
+    eines Werts. ``note`` wird an den formatierten Wert angehaengt und
+    benennt offen, was nicht belegt ist (z. B. Geschlechtscode).
+    """
+    attr: str
+    label: str
+    kind: str = "text"          # text|int|float|hex|version|filetime
+    section: str = "player"     # player|save
+    note: str = ""
+
+
+#: **Feldinventur der Spieleransicht** — Reihenfolge = Anzeigereihenfolge.
+#:
+#: Das ist die einzige Stelle, an der die Anzeige konfiguriert wird. Ein
+#: ``DatHeader``-Feld wird entweder hier eingetragen oder in
+#: :data:`PLAYER_VIEW_EXCLUDED` mit Begruendung. Fehlt es in beiden, meldet
+#: :func:`unmapped_header_fields` das Feld, und die Anzeige stellt es mit
+#: seinem Attributnamen dar — statt es zu verschweigen.
+PLAYER_VIEW_FIELDS: tuple[PlayerField, ...] = (
+    # -- Spieler / Charakter ------------------------------------------
+    PlayerField("player_name", "Name"),
+    PlayerField("player_level", "Level", "int"),
+    PlayerField("player_location", "Location"),
+    PlayerField("playtime", "Playtime"),
+    PlayerField("race_name", "Race"),
+    PlayerField("gender", "Gender", "int", note="Code, Bedeutung nicht belegt"),
+    PlayerField("experience", "Experience", "float"),
+    PlayerField("experience_required", "Experience required", "float"),
+    # -- Save / Header -------------------------------------------------
+    PlayerField("filetime", "Save time", "filetime", "save"),
+    PlayerField("save_number", "Save number", "int", "save"),
+    PlayerField("save_version", "Save version", "int", "save"),
+    PlayerField("save_version_2", "Save version 2", "int", "save"),
+    PlayerField("current_game_version", "Game version", "version", "save"),
+    PlayerField("created_game_version", "Created with", "version", "save"),
+    PlayerField("engine_version", "Engine version", "hex", "save"),
+    PlayerField("header_size", "Header size", "int", "save"),
+    PlayerField("padding_end", "Header body end", "int", "save"),
+    PlayerField("plugin_info_offset", "Plugin block at", "hex", "save"),
+    PlayerField("plugin_info_size", "Plugin block size", "int", "save"),
+    PlayerField("unknown_field_0", "Unassigned field", "int", "save",
+                note="Bedeutung nicht belegt"),
+)
+
+#: Bewusst **nicht** in der Spieleransicht — jeweils mit Begruendung, damit
+#: die Abwesenheit nachpruefbar ist und nicht als Versehen gilt.
+PLAYER_VIEW_EXCLUDED: dict[str, str] = {
+    "header_count_start":
+        "Formatkonstante (immer 16), kein Messwert des Saves",
+}
+
+#: Abschnittsueberschriften der Spieleransicht.
+PLAYER_VIEW_SECTIONS: tuple[tuple[str, str], ...] = (
+    ("player", "PLAYER"),
+    ("save", "SAVE"),
+)
+
+
+def _dat_header_fieldnames() -> tuple[str, ...]:
+    """Alle Feldnamen des :class:`DatHeader` in Deklarationsreihenfolge."""
+    return tuple(item.name for item in fields(DatHeader))
+
+
+def unmapped_header_fields() -> tuple[str, ...]:
+    """Header-Felder, die weder angezeigt noch begruendet ausgeschlossen sind.
+
+    Leer heisst: die Anzeige deckt den dekodierten Header vollstaendig ab.
+    Wird der Parser spaeter um ein Feld erweitert, meldet diese Funktion es
+    und :func:`player_view_sections` zeigt es an — die Anzeige faellt also
+    nicht stillschweigend hinter den Parser zurueck.
+    """
+    mapped = {item.attr for item in PLAYER_VIEW_FIELDS}
+    excluded = set(PLAYER_VIEW_EXCLUDED)
+    return tuple(name for name in _dat_header_fieldnames()
+                 if name not in mapped and name not in excluded)
+
+
+def filetime_to_utc(filetime: Any) -> str | None:
+    """Windows-FILETIME als UTC-Text — ``None``, wenn kein Zeitpunkt.
+
+    Belegt an neun realen Saves: der Savegame-Dateiname traegt denselben
+    Zeitstempel, Abweichung 0 Sekunden in allen neun Faellen. Der Wert ist
+    ein ``u64`` in 100-ns-Schritten seit 1601-01-01 UTC; ``filetime // 10``
+    ergibt die Mikrosekunden.
+    """
+    if isinstance(filetime, bool) or not isinstance(filetime, int):
+        return None
+    if filetime <= 0:
+        return None
+    try:
+        moment = _FILETIME_EPOCH + datetime.timedelta(microseconds=filetime // 10)
+    except (OverflowError, ValueError):
+        return None
+    return moment.strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
+def _player_scalar(kind: str, value: Any) -> str:
+    """Ein einzelner Headerwert in seiner Anzeigeform (ohne ``note``)."""
+    if value is None:
+        return PLAYER_VIEW_MISSING
+    if kind == "auto":
+        # Nicht zugeordnetes Feld: der Typ ist unbekannt, deshalb wird der
+        # Wert **typgerecht** ausgegeben statt verworfen. Nur Objekte, deren
+        # Text nicht belegt ist, werden als nicht zugeordnet gekennzeichnet.
+        if isinstance(value, bool):
+            return "True" if value else "False"
+        if isinstance(value, int):
+            return "%d" % value
+        if isinstance(value, float):
+            return "%.6g" % value
+        if isinstance(value, str):
+            text = value.strip("\x00")
+            return text if text else PLAYER_VIEW_EMPTY
+        return "%s (%s)" % (PLAYER_VIEW_UNASSIGNED, type(value).__name__)
+    if kind in ("int", "hex", "filetime"):
+        if isinstance(value, bool) or not isinstance(value, int):
+            return PLAYER_VIEW_UNASSIGNED
+        if kind == "int":
+            return "%d" % value
+        if kind == "hex":
+            return "0x%08X" % value
+        stamp = filetime_to_utc(value)
+        if stamp is None:
+            return "%d (kein gueltiger Zeitstempel)" % value
+        return "%d (%s)" % (value, stamp)
+    if kind == "float":
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return PLAYER_VIEW_UNASSIGNED
+        return "%.3f" % float(value)
+    # text / version — beliebiger Text, aber kein erfundener Ersatzwert
+    if not isinstance(value, str):
+        return PLAYER_VIEW_UNASSIGNED
+    text = value.strip("\x00")
+    return text if text else PLAYER_VIEW_EMPTY
+
+
+def format_player_value(item: PlayerField, value: Any) -> str:
+    """Anzeigetext eines Feldes; unbelegte Bedeutung wird mitgenannt."""
+    text = _player_scalar(item.kind, value)
+    if item.note and text not in (PLAYER_VIEW_MISSING, PLAYER_VIEW_UNASSIGNED):
+        return "%s (%s)" % (text, item.note)
+    return text
+
+
+def player_view_rows(header: DatHeader) -> list[tuple[str, str]]:
+    """Alle Zeilen der Spieleransicht als ``(Beschriftung, Text)``.
+
+    Enthaelt jedes Feld aus :data:`PLAYER_VIEW_FIELDS` **und** jedes noch
+    nicht zugeordnete ``DatHeader``-Feld (mit seinem Attributnamen).
+    """
+    rows: list[tuple[str, str]] = []
+    for item in PLAYER_VIEW_FIELDS:
+        rows.append((item.label,
+                     format_player_value(item, getattr(header, item.attr, None))))
+    for name in unmapped_header_fields():
+        rows.append((name, format_player_value(PlayerField(name, name, "auto"),
+                                              getattr(header, name, None))))
+    return rows
+
+
+def player_view_sections(header: DatHeader) -> list[tuple[str, list[tuple[str, str]]]]:
+    """Spieleransicht in Abschnitte gruppiert — feste Reihenfolge."""
+    buckets: dict[str, list[tuple[str, str]]] = {key: [] for key, _ in PLAYER_VIEW_SECTIONS}
+    for item in PLAYER_VIEW_FIELDS:
+        buckets.setdefault(item.section, []).append(
+            (item.label, format_player_value(item, getattr(header, item.attr, None))))
+    for name in unmapped_header_fields():
+        buckets.setdefault("save", []).append(
+            (name, format_player_value(PlayerField(name, name, "auto"),
+                                       getattr(header, name, None))))
+    return [(title, buckets[key]) for key, title in PLAYER_VIEW_SECTIONS if buckets.get(key)]
+
+
+def player_view_text(header: DatHeader, *, label_width: int = 20,
+                     columns: int = 1, gutter: str = "    ") -> str:
+    """Die Spieleransicht als Textblock (GUI-Karte und Tests nutzen diesen Weg).
+
+    ``columns=2`` stellt die Abschnitte nebeneinander statt untereinander.
+    Das setzt eine **Monospace**-Schrift voraus — dann bleibt die
+    Spaltenausrichtung erhalten und die Karte bleibt flach genug, um ohne
+    Scrollen vollstaendig sichtbar zu sein.
+    """
+    blocks = [_render_block(title, rows, label_width)
+              for title, rows in player_view_sections(header)]
+    if not blocks:
+        return ""
+    if columns <= 1 or len(blocks) < 2:
+        return "\n\n".join("\n".join(block) for block in blocks)
+    widths = [max((len(line) for line in block), default=0) for block in blocks]
+    height = max(len(block) for block in blocks)
+    lines: list[str] = []
+    for index in range(height):
+        cells = []
+        for position, block in enumerate(blocks):
+            cell = block[index] if index < len(block) else ""
+            if position < len(blocks) - 1:
+                cell = cell.ljust(widths[position])
+            cells.append(cell)
+        lines.append(gutter.join(cells).rstrip())
+    return "\n".join(lines)
+
+
+def _render_block(title: str, rows: list[tuple[str, str]],
+                  label_width: int) -> list[str]:
+    """Ein Abschnitt als Zeilenliste mit punktgefuellter Beschriftung."""
+    block = [title]
+    for label, value in rows:
+        padded = label + "." * max(1, label_width - len(label))
+        block.append("%s %s" % (padded, value))
+    return block
 
 
 @dataclass
@@ -230,30 +600,18 @@ class SfsDecodeProvider:
             data = f.read(96)
         if data[:4] != SFS_MAGIC:
             raise ValueError(f"Not an SFS file: {data[:4]!r} (expected b'BCPS')")
-        # Header layout per Nexus-Mods/StarfieldSaveTool/SfsFile.cs ReadHeader()
-        # EXACT offsets (no guessing):
-        off = 4
-        version0,           = struct.unpack_from("<i", data, off); off += 4   # +4
-        chunk_sizes_offset, = struct.unpack_from("<q", data, off); off += 8   # +8
-        unknown0,           = struct.unpack_from("<q", data, off); off += 8   # +16
-        compressed_offset,  = struct.unpack_from("<q", data, off); off += 8   # +24
-        uncompressed_size,  = struct.unpack_from("<q", data, off); off += 8   # +32
-        version1,           = struct.unpack_from("<f", data, off); off += 4   # +40
-        unknown1,           = struct.unpack_from("<i", data, off); off += 4   # +44
-        chunk_size_pre,     = struct.unpack_from("<q", data, off); off += 8   # +48
-        padding_size,       = struct.unpack_from("<q", data, off); off += 8   # +56
-        unknown2,           = struct.unpack_from("<i", data, off); off += 4   # +64
-        compression         = data[off:off + 4]                                # +68
-        if compression != b'ZIP ':
-            raise ValueError(f"Only ZIP compression supported, got {compression!r}")
-        chunk_count = (uncompressed_size + chunk_size_pre - 1) // chunk_size_pre
+        # Header-Layout per Nexus-Mods/StarfieldSaveTool/SfsFile.cs ReadHeader(),
+        # EIN Offset-Durchlauf in _layout_from().
+        layout = _layout_from(data)
+        if layout.compression != b'ZIP ':
+            raise ValueError(f"Only ZIP compression supported, got {layout.compression!r}")
         return SfsContainer(
-            version0=version0,
-            chunk_size_pre=chunk_size_pre,
-            padding_size=padding_size,
-            uncompressed_size=uncompressed_size,
-            compressed_offset=compressed_offset,
-            chunk_count=chunk_count,
+            version0=layout.version0,
+            chunk_size_pre=layout.chunk_size_pre,
+            padding_size=layout.padding_size,
+            uncompressed_size=layout.uncompressed_size,
+            compressed_offset=layout.compressed_offset,
+            chunk_count=layout.chunk_count,
         )
 
     def decompress(self, sfs_path: str, *, verify: bool = True) -> bytes:
@@ -270,27 +628,17 @@ class SfsDecodeProvider:
             data = f.read()
         if data[:4] != SFS_MAGIC:
             raise ValueError(f"Not an SFS file: {data[:4]!r}")
-        # Re-parse full header using same layout as read_container()
-        off = 4
-        off += 4            # version0 (int32)
-        chunk_sizes_offset, = struct.unpack_from("<q", data, off); off += 8
-        off += 8            # unknown0
-        compressed_offset,  = struct.unpack_from("<q", data, off); off += 8
-        uncompressed_size,  = struct.unpack_from("<q", data, off); off += 8
-        off += 4            # version1 (float)
-        off += 4            # unknown1 (int32)
-        chunk_size_pre,    = struct.unpack_from("<q", data, off); off += 8
-        padding_size,      = struct.unpack_from("<q", data, off); off += 8
-        # Skip unknown2 (int32) and compression type (char[4])
-        off += 4 + 4
-        # Chunk sizes array starts at chunk_sizes_offset, ends at compressed_offset
-        chunk_count = (uncompressed_size + chunk_size_pre - 1) // chunk_size_pre
+        # Gleicher Kopf-Durchlauf wie read_container(); die Kompressionsart wird
+        # hier bewusst NICHT vorab abgewiesen — I-02 meldet den Befund, statt
+        # dass der Ladepfad ohne Bewertung abbricht.
+        layout = _layout_from(data)
+        chunk_count = layout.chunk_count
         chunk_sizes = list(
-            struct.unpack_from(f"<{chunk_count}i", data, chunk_sizes_offset)
+            struct.unpack_from(f"<{chunk_count}i", data, layout.chunk_sizes_offset)
         )
 
         out = bytearray()
-        pos = compressed_offset
+        pos = layout.compressed_offset
         for chunk_idx, cs in enumerate(chunk_sizes):
             chunk = data[pos:pos + cs]
             try:
@@ -298,17 +646,161 @@ class SfsDecodeProvider:
             except zlib.error as e:
                 raise ValueError(
                     f"zlib-decompression failed at chunk {chunk_idx} "
-                    f"(pos=0x{pos:X}, size={cs}): {e}"
+                    f"(pos=0x{pos:X}, size={cs}): {e}"  # exception-text-reviewed: zlib.error traegt nur Zahlen
                 )
-            padded = (cs + padding_size - 1) & ~(padding_size - 1) if padding_size else cs
-            pos += padded
+            pos += layout.padded(cs)
         result = bytes(out)
-        if verify and len(result) != uncompressed_size:
+        if verify and len(result) != layout.uncompressed_size:
             raise ValueError(
                 "decompressed length %d does not match declared uncompressed_size %d "
-                "(delta %+d bytes)" % (len(result), uncompressed_size,
-                                       len(result) - uncompressed_size))
+                "(delta %+d bytes)" % (len(result), layout.uncompressed_size,
+                                       len(result) - layout.uncompressed_size))
         return result
+
+    # -----------------------------------------------------------------
+    # Header-only-Pfad: Kopfdaten lesen, Rumpf nicht entpacken
+    # -----------------------------------------------------------------
+    #: Zusaetzliche Nutzbytes, die ueber den ersten Chunk hinaus entpackt
+    #: werden. 0 = nur der erste Chunk (dort liegt der Header bei realen Saves:
+    #: padding_end 139/141 gegen 262.144 Nutzbytes je Chunk). Reicht der erste
+    #: Chunk nicht fuer den Header, verlaengert ``read_header`` selbsttaetig bis
+    #: zum vollen Strom — lieber einmal zu viel als ein halber Header.
+    HEADER_PREFIX_BYTES = 0
+    #: Blockgroesse beim Hashen des komprimierten Stroms.
+    DIGEST_BLOCK_BYTES = 1 << 20
+
+    def read_layout(self, sfs_path: str) -> tuple[ContainerLayout, tuple[int, ...], int]:
+        """Liest BCPS-Kopf und Chunk-Groessentabelle, ohne den Strom zu entpacken.
+
+        Gelesen werden 72 Byte Kopf plus 4 Byte je Chunk — bei einem 8-MB-Save
+        rund 300 Byte statt der ganzen Datei.
+        """
+        with open(sfs_path, "rb") as handle:
+            head = handle.read(CONTAINER_HEADER_END)
+            if head[:4] != SFS_MAGIC:
+                raise ValueError("Not an SFS file: %r (expected b'BCPS')"
+                                 % (head[:4],))
+            layout = _layout_from(head)
+            if layout.compression != b'ZIP ':
+                raise ValueError("Only ZIP compression supported, got %r"
+                                 % (layout.compression,))
+            sizes = self._read_chunk_sizes(handle, layout)
+            file_size = handle.seek(0, os.SEEK_END)
+        return layout, sizes, file_size
+
+    @staticmethod
+    def _read_chunk_sizes(handle: BinaryIO, layout: ContainerLayout) -> tuple[int, ...]:
+        """Liest die Chunk-Groessentabelle; meldet eine unvollstaendige Tabelle."""
+        count = layout.chunk_count
+        if not count:
+            return ()
+        handle.seek(layout.chunk_sizes_offset)
+        raw = handle.read(4 * count)
+        if len(raw) != 4 * count:
+            raise ValueError(
+                "chunk table incomplete: %d of %d bytes at offset 0x%X"
+                % (len(raw), 4 * count, layout.chunk_sizes_offset))
+        return struct.unpack("<%di" % count, raw)
+
+    def _decode_prefix(self, sfs_path: str, layout: ContainerLayout,
+                       sizes: tuple[int, ...], *, stop_bytes: int):
+        """Entpackt Chunks ab ``compressed_offset`` bis ``stop_bytes`` Nutzbytes.
+
+        Rueckgabe ``(nutzbytes, anzahl_entpackter_chunks)``. Ein zlib-Fehler
+        bricht mit ``ValueError`` ab: ein nicht entpackbarer Chunk ist ein
+        struktureller Befund, kein blosser Headerengpass.
+        """
+        out = bytearray()
+        pos = layout.compressed_offset
+        decoded = 0
+        with open(sfs_path, "rb") as handle:
+            for index, size in enumerate(sizes):
+                handle.seek(pos)
+                chunk = handle.read(size)
+                try:
+                    out += zlib.decompress(chunk)
+                except zlib.error as exc:
+                    raise ValueError(
+                        "zlib-decompression failed at chunk %d (pos=0x%X, size=%d): %s"
+                        % (index, pos, size, exc)) from exc  # exception-text-reviewed: zlib.error
+                decoded += 1
+                pos += layout.padded(size)
+                if len(out) >= stop_bytes:
+                    break
+        return bytes(out), decoded
+
+    def read_header(self, sfs_path: str, *,
+                    min_bytes: int = HEADER_PREFIX_BYTES) -> dict[str, Any]:
+        """Dekodiert ausschliesslich den ``SFS_SAVEGAME``-Header.
+
+        Entpackt so viele Chunks wie fuer den Header noetig — in der Regel
+        genau einen. Der Rumpf wird NICHT entpackt und damit auch nicht
+        geprueft; das bleibt I-01..I-13 auf dem Bezugssave. Fuer die
+        Sequenzpruefung werden nur Headerfelder gebraucht.
+
+        Fehler:
+          * ``ValueError`` — Container strukturell ungueltig (Magic,
+            Kompressionsart, Chunk-Tabelle, abgeschnittener Strom, zlib).
+          * ``SfsHeaderError`` — Container lesbar, Header nicht dekodierbar.
+        """
+        layout, sizes, file_size = self.read_layout(sfs_path)
+        expected_end = layout.compressed_offset + sum(layout.padded(s) for s in sizes)
+        if expected_end > file_size:
+            raise ValueError(
+                "compressed stream truncated: %d of %d bytes present"
+                % (max(0, file_size - layout.compressed_offset),
+                   expected_end - layout.compressed_offset))
+
+        prefix, decoded = self._decode_prefix(
+            sfs_path, layout, sizes, stop_bytes=max(1, min_bytes))
+        try:
+            header = self.parse_dat_header(prefix)
+        except Exception as first:                              # noqa: BLE001
+            if decoded >= len(sizes):
+                raise SfsHeaderError(
+                    "SFS_SAVEGAME header not decodable (%d of %d chunks, %d bytes): "
+                    "%s: %s" % (decoded, len(sizes), len(prefix),
+                                type(first).__name__, first)) from first  # exception-text-reviewed: nur Parser-Text
+            # Header reicht ueber den Prefix hinaus -> einmal vollstaendig entpacken.
+            prefix, decoded = self._decode_prefix(
+                sfs_path, layout, sizes, stop_bytes=layout.uncompressed_size)
+            try:
+                header = self.parse_dat_header(prefix)
+            except Exception as second:                         # noqa: BLE001
+                raise SfsHeaderError(
+                    "SFS_SAVEGAME header not decodable (%d bytes): %s: %s"
+                    % (len(prefix), type(second).__name__, second)) from second  # exception-text-reviewed: nur Parser-Text
+        return {
+            "header": header,
+            "layout": layout,
+            "sizes": sizes,
+            "chunks_decoded": decoded,
+            "chunks_total": len(sizes),
+            "payload_bytes": len(prefix),
+            "full_decoded": decoded >= len(sizes),
+            "file_size": file_size,
+            "trailing_bytes": max(0, file_size - expected_end),
+        }
+
+    def stream_digest(self, sfs_path: str, *,
+                      layout: ContainerLayout | None = None) -> str:
+        """SHA-256 ueber den komprimierten Datenstrom (inkl. Padding).
+
+        Gleicher Digest plus gleiche Chunk-Geometrie bedeutet nach zlib
+        zwingend gleichen entpackten Payload. Damit laesst sich die
+        Payload-Deduplizierung weiterfuehren, ohne jeden Rumpf zu entpacken.
+        """
+        if layout is None:
+            layout, _sizes, _file_size = self.read_layout(sfs_path)
+        digest = hashlib.sha256()
+        with open(sfs_path, "rb") as handle:
+            handle.seek(layout.compressed_offset)
+            while True:
+                block = handle.read(self.DIGEST_BLOCK_BYTES)
+                if not block:
+                    break
+                digest.update(block)
+        return digest.hexdigest()
 
     # -----------------------------------------------------------------
     # SFS_SAVEGAME header + plugin info
@@ -341,6 +833,7 @@ class SfsDecodeProvider:
         filetime, = struct.unpack_from("<Q", decompressed, off); off += 8
         unknown0, = struct.unpack_from("<I", decompressed, off); off += 4
         off += 8  # padding
+        padding_end = off          # ab hier zaehlt header_size nicht mehr
         save_version_2 = decompressed[off]; off += 1
         cur_ver_size, = struct.unpack_from("<H", decompressed, off); off += 2
         cur_ver = decompressed[off:off + cur_ver_size].decode("ascii", errors="replace")
@@ -368,6 +861,9 @@ class SfsDecodeProvider:
             created_game_version=cre_ver,
             plugin_info_offset=off,
             plugin_info_size=plugin_info_size,
+            padding_end=padding_end,
+            header_count_start=16,
+            unknown_field_0=unknown0,
         )
 
     NATIVE_PLUGINS = {
@@ -616,27 +1112,20 @@ class SfsDecodeProvider:
             data = f.read()
         if data[:4] != SFS_MAGIC:
             raise ValueError("Not an SFS file: %r" % data[:4])
-        off = 4
-        off += 4                                            # version0
-        chunk_sizes_offset, = struct.unpack_from("<q", data, off); off += 8
-        off += 8                                            # unknown0
-        compressed_offset, = struct.unpack_from("<q", data, off); off += 8
-        uncompressed_size, = struct.unpack_from("<q", data, off); off += 8
-        off += 4                                            # version1 (float)
-        off += 4                                            # unknown1
-        chunk_size_pre, = struct.unpack_from("<q", data, off); off += 8
-        padding_size, = struct.unpack_from("<q", data, off); off += 8
-        off += 4                                            # unknown2
-        compression = data[off:off + 4]
-        count = ((uncompressed_size + chunk_size_pre - 1) // chunk_size_pre
-                 if chunk_size_pre else 0)
+        layout = _layout_from(data)
+        chunk_sizes_offset = layout.chunk_sizes_offset
+        compressed_offset = layout.compressed_offset
+        uncompressed_size = layout.uncompressed_size
+        chunk_size_pre = layout.chunk_size_pre
+        padding_size = layout.padding_size
+        compression = layout.compression
+        count = layout.chunk_count
         sizes: list[int] = []
         if count and chunk_sizes_offset + 4 * count <= len(data):
             sizes = list(struct.unpack_from("<%di" % count, data, chunk_sizes_offset))
-        padded = [((s + padding_size - 1) & ~(padding_size - 1)) if padding_size else s
-                  for s in sizes]
+        padded = [layout.padded(s) for s in sizes]
         return {
-            "version0": struct.unpack_from("<i", data, 4)[0],
+            "version0": layout.version0,
             "chunk_sizes_offset": chunk_sizes_offset,
             "compressed_offset": compressed_offset,
             "uncompressed_size": uncompressed_size,
@@ -650,7 +1139,7 @@ class SfsDecodeProvider:
             "table_end": chunk_sizes_offset + 4 * count,
             "file_size": len(data),
             "data_rest": len(data) - compressed_offset,
-            "header_end": off + 4,
+            "header_end": CONTAINER_HEADER_END,
         }
 
     # -----------------------------------------------------------------

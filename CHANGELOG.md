@@ -1,5 +1,42 @@
 # Changelog — Starfield Data Analysis
 
+## Unreleased
+
+The Savegame Analyzer's player card now shows every header field the save
+actually contains. Read-only as before.
+
+**Changed**
+
+- The player card is no longer a fixed selection. Save time (raw value plus
+  the UTC timestamp), created game version, header size, header body end,
+  plugin block offset and size, and the previously unused header field are
+  part of it now. The card is read-only and the text can be selected, so the
+  values can be copied out.
+- The list is driven by `PLAYER_VIEW_FIELDS` in
+  `ssb_i/savegame_provider.py`. A parser field that is not classified there
+  still appears (under its attribute name) and fails the coverage test in
+  `tests/test_ssb_i_player_view.py`, so the card cannot quietly fall behind
+  the parser.
+- Values the save does not provide are marked as missing, empty or
+  unassigned. No placeholder stands in for a measurement, and a code without
+  a documented meaning (the gender field) is labelled as such.
+
+**Fixed**
+
+- Experience lost precision: 781.805 was displayed as 781.80. Three decimals
+  now.
+- The player card had no monospace style hint, so on systems without the
+  bundled font family it fell back to a proportional font and the two
+  columns drifted into each other.
+
+**Privacy**
+
+- The player card is the channel the user opens on purpose. Status line,
+  header dump, export, CLI output and error texts are unchanged and still go
+  through `public_header_view()`. `tests/test_ssb_i_player_view.py` checks
+  both sides on the same header: the identity markers appear in the card and
+  in none of the diagnostic channels.
+
 ## 1.5.3 — 2026-11-08
 
 Save format corrections and the first integrity layer. Read-only throughout: no

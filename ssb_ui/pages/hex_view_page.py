@@ -16,6 +16,8 @@ from __future__ import annotations
 
 from typing import Callable, Optional
 
+from ssb_i.errors import public_error
+
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
@@ -199,9 +201,12 @@ class HexViewPage(QWidget):
             with open(path, "rb") as handle:
                 data = handle.read()
         except OSError as exc:
-            QMessageBox.critical(self, "File not readable", str(exc))
+            QMessageBox.critical(self, "File not readable", public_error(exc))
             return
-        self.set_buffer(data, path)
+        # R1_6 / F-2: der Pfad wird NICHT als Label uebergeben — die
+        # Infozeile wuerde ihn sonst anzeigen. Es genuegt die Angabe,
+        # dass ein Buffer geladen ist.
+        self.set_buffer(data, "buffer")
 
     # -------------------------------------------------------------- Navigation
     def on_goto(self) -> None:

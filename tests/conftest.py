@@ -220,15 +220,39 @@ DEFAULT_STRINGS = ["Sequence", "SitSleep", "Sandbox", "LocPt",
                    "actors\\human\\animations\\furniture\\terminal_standing"]
 
 
+#: Feste Bytes des Headers zwischen name und createdGameVersion.
+#: Hergeleitet aus der belegten Feldreihenfolge (siehe _HEADER_FIXED_BYTES).
+_HEADER_FIXED_BYTES = 51
+
+
+def expected_header_size(player_name: str, player_location: str,
+                         playtime: str, race_name: str) -> int:
+    """Von ``headerSize`` gezaehlter Bereich: 51 feste + vier Stringlaengen.
+
+    Belegt an sechs realen Saves (6/6 exakt) und unabhaengig von den konkreten
+    Werten: 51 + len(name) + len(location) + len(playtime) + len(race).
+    """
+    return (_HEADER_FIXED_BYTES + len(player_name) + len(player_location)
+            + len(playtime) + len(race_name))
+
+
 def build_dat_payload(*, normal: list[bytes] | None = None,
                       light: list[bytes] | None = None,
                       medium: list[bytes] | None = None,
                       strings: list[str] | None = None,
                       body: bytes | None = None,
                       body_options: dict | None = None,
-                      header_size_field: int = 125,
+                      header_size_field: int | None = None,
                       plugin_info_size_override: int | None = None,
                       save_version: int = 153,
+                      player_name: str = "TestPilot",
+                      player_location: str = "Jemison - New Atlantis",
+                      playtime: str = "1d.2h.3m.1 Tag.2 Stunden.3 Minuten",
+                      race_name: str = "HumanRace",
+                      save_number: int = 1,
+                      player_level: int = 24,
+                      filetime: int = 134358573240754512,
+                      truncate_at: int | None = None,
                       **plugin_kwargs) -> bytes:
     """Vollstaendiger Payload: 12-Byte-Magic + Header + Plugin-Block + Body."""
     normal = normal if normal is not None else [
@@ -244,19 +268,22 @@ def build_dat_payload(*, normal: list[bytes] | None = None,
     block = build_plugin_block(normal=normal, light=light, medium=medium,
                               **plugin_kwargs)
     head = bytearray(b"SFS_SAVEGAME")
+    if header_size_field is None:
+        header_size_field = expected_header_size(player_name, player_location,
+                                                 playtime, race_name)
     head += struct.pack("<I", header_size_field)
     head += struct.pack("<I", 27)                          # engineVersion
     head += bytes([save_version])                          # saveVersion
-    head += struct.pack("<I", 1)                           # saveNumber
-    head += _qstring("TestPilot")                          # playerName
-    head += struct.pack("<I", 24)                          # playerLevel
-    head += _qstring("Jemison - New Atlantis")             # playerLocation
-    head += _qstring("1d.2h.3m.1 Tag.2 Stunden.3 Minuten")  # playtime
-    head += _qstring("HumanRace")                          # raceName
+    head += struct.pack("<I", save_number)                 # saveNumber
+    head += _qstring(player_name)                          # playerName
+    head += struct.pack("<I", player_level)                # playerLevel
+    head += _qstring(player_location)                      # playerLocation
+    head += _qstring(playtime)                             # playtime
+    head += _qstring(race_name)                            # raceName
     head += struct.pack("<H", 0)                           # gender
     head += struct.pack("<f", 1.0)                         # experience
     head += struct.pack("<f", 2.0)                         # experienceRequired
-    head += struct.pack("<Q", 134358573240754512)          # filetime
+    head += struct.pack("<Q", filetime)                     # filetime
     head += struct.pack("<I", 0)                           # unknown0
     head += b"\x00" * 8                                    # padding
     head += bytes([save_version])                          # saveVersion2
@@ -269,7 +296,10 @@ def build_dat_payload(*, normal: list[bytes] | None = None,
         options = dict(body_options or {})
         body = build_body_head(strings if strings is not None else DEFAULT_STRINGS,
                                base=len(head), **options)
-    return bytes(head) + body
+    result = bytes(head) + body
+    if truncate_at is not None:
+        result = result[:truncate_at]
+    return result
 
 
 def write_save(path: Path, payload: bytes, **container_kwargs) -> Path:

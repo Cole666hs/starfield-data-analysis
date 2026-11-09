@@ -43,6 +43,7 @@ if str(_ROOT) not in sys.path:
 # Produktname und -version aus EINER Quelle (ssb_i/product.py), damit GUI, CLI
 # und Release-Dateien nie auseinanderlaufen. SSB_APP_NAME bleibt als Override
 # für den Workbench-Build (SSB-M) erhalten.
+from ssb_i.errors import public_error
 from ssb_i.product import DEVELOPER as _DEVELOPER
 from ssb_i.product import PRODUCT_NAME as _PRODUCT_NAME
 from ssb_i.product import PRODUCT_SUBTITLE as _PRODUCT_SUBTITLE
@@ -50,7 +51,10 @@ from ssb_i.product import CLI_PROG
 from ssb_i.product import VERSION as PRODUCT_VERSION
 
 # Produktname und -version kommen ausschliesslich aus ssb_i/product.py.
-APP_NAME = os.environ.get("SFDA_APP_NAME") or _PRODUCT_NAME
+#: Anzeigename des Programms. R1_6: annotierte Konstante — der Wert
+#: stammt aus der Umgebung oder aus dem Produktnamen, nicht aus einem
+#: Dateisystempfad.
+APP_NAME: str = os.environ.get("SFDA_APP_NAME") or _PRODUCT_NAME
 APP_SUBTITLE = _PRODUCT_SUBTITLE
 
 
@@ -202,8 +206,8 @@ class SavegamePage(QWidget):
             self._inner = _RealPage()
             layout.addWidget(self._inner)
         except Exception as e:  # pragma: no cover - nur bei kaputtem Build
-            self.load_error = f"{type(e).__name__}: {e}"
-            info = QLabel(f"Savegame page could not be loaded: {e}")
+            self.load_error = public_error(e)
+            info = QLabel(f"Savegame page could not be loaded: {public_error(e)}")
             info.setStyleSheet(f"color: {TEXT_DIM};")
             layout.addWidget(info)
 
@@ -379,7 +383,7 @@ def self_test(save: str, out_path: str | None = None) -> int:
         # aufgehen — er blockiert den Prozess und der Selbsttest endet nie.
         loaded = inner.load_file(save, show_dialog=False)
     except Exception as exc:  # pragma: no cover - nur im Bundle relevant
-        emit("SELF_TEST FAIL load: %s: %s" % (type(exc).__name__, exc))
+        emit("SELF_TEST FAIL load: %s" % public_error(exc))
         return finish(1)
     if not loaded:
         emit("SELF_TEST FAIL load: %s"
@@ -391,9 +395,11 @@ def self_test(save: str, out_path: str | None = None) -> int:
         emit("SELF_TEST FAIL: no header/plugin result")
         return finish(1)
     ok = (info.decode_state == "VALIDATED" and info.total > 0)
-    emit("SELF_TEST player=%r level=%s game=%s save_version=%s"
-         % (header.player_name, header.player_level,
-            header.current_game_version, header.save_version))
+    # R1_6: der Spielername darf nicht in der Self-Test-Ausgabe stehen.
+    # Der Name landet in stdout UND in der per --out geschriebenen Datei.
+    emit("SELF_TEST level=%s game=%s save_version=%s"
+         % (header.player_level, header.current_game_version,
+            header.save_version))
     emit("SELF_TEST header_fields=%d decompressed_bytes=%d"
          % (len(header.to_dict()), len(inner.decompressed or b"")))
     emit("SELF_TEST plugins state=%s normal=%d light=%d medium=%d"
@@ -441,7 +447,12 @@ def main() -> int:
         return dump_pages(out_path)
     if len(sys.argv) >= 2 and sys.argv[1] == "--self-test":
         if len(sys.argv) < 3:
-            print("usage: %s --self-test <save.sfs> [--out <report.txt>]" % sys.argv[0])
+            # R1_6 / F-2: weder ``sys.argv[0]`` (ein Pfad) noch dessen
+            # Dateiname werden ausgegeben. Der Programmname genuegt als
+            # Orientierung — er ist statisch und wird nicht aus dem
+            # Dateisystem gelesen.
+            print("usage: %s --self-test <save.sfs> [--out <report.txt>]"
+                  % APP_NAME)
             return 2
         out_path = None
         if "--out" in sys.argv:

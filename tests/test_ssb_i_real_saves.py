@@ -179,8 +179,30 @@ def test_every_real_save_passes_structural_checks(real_saves):
         assert report.statuses["I-10"] == PASS, path.name
         assert report.statuses["I-11"] == PASS, path.name
         assert report.total in (PASS, WARNING), (path.name, report.total)
-        assert report.statuses["I-09"] == "UNKNOWN", path.name
+        # I-09 seit 1.5.3 belegt: headerSize == padding_end - 16
+        assert report.statuses["I-09"] == PASS, path.name
         assert report.statuses["I-13"] == "NOT_CHECKED", path.name
+
+
+def test_i09_matches_padding_end_on_all_real_saves(real_saves, provider):
+    """Golden: headerSize == padding_end - 16, Abweichung 0 Byte."""
+    for path in real_saves:
+        payload = provider.decompress(str(path))
+        header = provider.parse_dat_header(payload)
+        assert header.padding_end is not None, path.name
+        assert header.header_size == header.padding_end - 16, path.name
+        assert header.padding_end in (139, 141), path.name
+
+
+def test_i14_is_assessed_through_the_cli_path(real_saves):
+    """Die Sequenzpruefung laeuft ueber den regulaeren Aufruf, nicht nur direkt."""
+    from ssb_i.save_integrity import PASS as P, collect_sequence, run_all
+
+    sequence = collect_sequence(real_saves[0])
+    assert len(sequence) >= 2
+    report = run_all(real_saves[0], sequence=sequence)
+    assert report.statuses["I-14"] == P, report.by_id("I-14").detail
+    assert report.coverage["assessed"] >= 12
 
 
 def test_i03_reports_alignment_gap_as_warning(real_saves):
