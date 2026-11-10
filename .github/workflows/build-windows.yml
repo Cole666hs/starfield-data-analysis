@@ -44,43 +44,95 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller==6.22.2
 
+      # Onefile: die beiden Programme liegen direkt in dist\.
+      # Es gibt kein _internal\ und damit kein eingebettetes Archiv.
       - name: Paket bauen (Onefile, ohne eingebettetes Archiv)
         run: |
           pyinstaller --noconfirm --clean Starfield-Data-Analysis.spec
         env:
           SFDA_BUILD_MODE: onefile
 
+      - name: Ergebnis pruefen
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $gui = "dist\StarfieldDataAnalysis.exe"
+          $cli = "dist\sfda.exe"
+          if (-not (Test-Path $gui)) { throw "StarfieldDataAnalysis.exe fehlt" }
+          if (-not (Test-Path $cli)) { throw "sfda.exe fehlt" }
+          Get-ChildItem dist | Select-Object Name, Length | Format-Table -AutoSize
+
       - name: Version pruefen
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $sfda = "dist\StarfieldDataAnalysis\sfda.exe"
-          if (-not (Test-Path $sfda)) { throw "sfda.exe fehlt" }
-          & $sfda --version
-          & "dist\StarfieldDataAnalysis\StarfieldDataAnalysis.exe" --dump-pages --out pages.txt
+          & "dist\sfda.exe" --version
+          if ($LASTEXITCODE -ne 0) { throw "sfda --version endete mit $LASTEXITCODE" }
+          & "dist\StarfieldDataAnalysis.exe" --dump-pages --out pages.txt
+          if ($LASTEXITCODE -ne 0) { throw "GUI --dump-pages endete mit $LASTEXITCODE" }
           Get-Content pages.txt
+
+      # Gegenprobe zum Ablehnungsgrund: kein Archiv darf im Paket liegen.
+      - name: Kein eingebettetes Archiv (Nexus-Scanregel)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $bad = Get-ChildItem -Path "dist" -Recurse -File |
+                 Where-Object { $_.Extension -match '^\.(zip|7z|rar|tar|gz|whl|pyz)$' }
+          if ($bad) {
+            $bad | ForEach-Object { Write-Host "VERSTOSS: $($_.FullName)" }
+            throw "Das Paket enthaelt ein eingebettetes Archiv."
+          }
+          Write-Host "OK: kein eingebettetes Archiv im Paket."
+
+      - name: Dokumente beilegen
+        shell: pwsh
+        run: |
+          foreach ($f in @("CHANGELOG.md","INSTALL.md","LICENSE.txt","README.md","requirements.txt")) {
+            Copy-Item $f "dist\$f"
+          }
 
       - name: SHA256SUMS schreiben
         shell: pwsh
         run: |
-          $files = Get-ChildItem -Path "dist\StarfieldDataAnalysis" -File
+          $files = Get-ChildItem -Path "dist" -File | Where-Object { $_.Name -ne "SHA256SUMS" }
           $lines = $files | ForEach-Object {
             $h = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower()
             "$h  $($_.Name)"
           }
-          $lines | Set-Content -Path "dist\StarfieldDataAnalysis\SHA256SUMS" -Encoding ascii
-          Get-Content "dist\StarfieldDataAnalysis\SHA256SUMS"
+          $lines | Set-Content -Path "dist\SHA256SUMS" -Encoding ascii
+          Get-Content "dist\SHA256SUMS"
+
+      - name: ZIP erzeugen (Ordner als Wurzel)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "package" | Out-Null
+          Copy-Item -Path "dist\*" -Destination "package\StarfieldDataAnalysis" -Recurse -Force
+          Compress-Archive -Path "package\StarfieldDataAnalysis" -DestinationPath "dist\Starfield-Data-Analysis-windows-x86_64.zip"
+          Get-Item "dist\Starfield-Data-Analysis-windows-x86_64.zip" | Select-Object Name, Length
+
+      - name: ZIP gegenpruefen (kein inneres Archiv)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $zip = [System.IO.Compression.ZipFile]::OpenRead((Resolve-Path "dist\Starfield-Data-Analysis-windows-x86_64.zip"))
+          try {
+            $inner = $zip.Entries | Where-Object { $_.Name -match '\.(zip|7z|rar|tar|gz|whl|pyz)$' }
+            Write-Host "Eintraege im ZIP: $($zip.Entries.Count)"
+            if ($inner) {
+              $inner | ForEach-Object { Write-Host "VERSTOSS: $($_.FullName)" }
+              throw "Das ZIP enthaelt ein eingebettetes Archiv."
+            }
+            Write-Host "OK: kein inneres Archiv im ZIP."
+          } finally {
+            $zip.Dispose()
+          }
 
       - name: Artefakt hochladen
         if: ${{ inputs.upload_artifact != false }}
         uses: actions/upload-artifact@v4
         with:
           name: Starfield-Data-Analysis-windows-x64
-          path: dist/StarfieldDataAnalysis/
+          path: dist/
           retention-days: 30
-
-      - name: ZIP erzeugen (Ordner als Wurzel)
-        shell: pwsh
-        run: |
-          Compress-Archive -Path "dist\StarfieldDataAnalysis" -DestinationPath "dist\Starfield-Data-Analysis-windows-x64.zip"
-          Get-Item "dist\Starfield-Data-Analysis-windows-x64.zip" | Select-Object Name, Length
