@@ -66,11 +66,22 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          & "dist\sfda.exe" --version
-          if ($LASTEXITCODE -ne 0) { throw "sfda --version endete mit $LASTEXITCODE" }
-          & "dist\StarfieldDataAnalysis.exe" --dump-pages --out pages.txt
-          if ($LASTEXITCODE -ne 0) { throw "GUI --dump-pages endete mit $LASTEXITCODE" }
-          Get-Content pages.txt
+          $env:QT_QPA_PLATFORM = "offscreen"
+
+          # Die GUI ist ein Windows-GUI-Subsystem-Programm. Ein Aufruf mit "&"
+          # kehrt sofort zurueck, deshalb muss gewartet werden.
+          $cli = Start-Process -FilePath "dist\sfda.exe" -ArgumentList "--version" `
+                  -NoNewWindow -Wait -PassThru
+          if ($cli.ExitCode -ne 0) { throw "sfda --version endete mit $($cli.ExitCode)" }
+
+          $pages = Join-Path $env:RUNNER_TEMP "pages.txt"
+          if (Test-Path $pages) { Remove-Item $pages }
+          $gui = Start-Process -FilePath "dist\StarfieldDataAnalysis.exe" `
+                  -ArgumentList @("--dump-pages", "--out", $pages) `
+                  -NoNewWindow -Wait -PassThru
+          if ($gui.ExitCode -ne 0) { throw "GUI --dump-pages endete mit $($gui.ExitCode)" }
+          if (-not (Test-Path $pages)) { throw "GUI hat keine pages-Datei geschrieben" }
+          Get-Content $pages
 
       # Gegenprobe zum Ablehnungsgrund: kein Archiv darf im Paket liegen.
       - name: Kein eingebettetes Archiv (Nexus-Scanregel)
