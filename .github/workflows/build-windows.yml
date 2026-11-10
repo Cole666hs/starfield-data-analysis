@@ -117,25 +117,44 @@ jobs:
       - name: ZIP erzeugen (Ordner als Wurzel)
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path "package" | Out-Null
-          Copy-Item -Path "dist\*" -Destination "package\StarfieldDataAnalysis" -Recurse -Force
-          Compress-Archive -Path "package\StarfieldDataAnalysis" -DestinationPath "dist\Starfield-Data-Analysis-windows-x86_64.zip"
+          # Compress-Archive packt bei einem Pfad den INHALT, nicht den Ordner.
+          # Fuer den Ordner als Wurzel braucht es das Sternchen-Muster.
+          $stage = "package"
+          Remove-Item -Recurse -Force $stage -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path "$stage\StarfieldDataAnalysis" | Out-Null
+          Copy-Item -Path "dist\*" -Destination "$stage\StarfieldDataAnalysis" -Recurse -Force
+          Compress-Archive -Path "$stage\StarfieldDataAnalysis" `
+                            -DestinationPath "dist\Starfield-Data-Analysis-windows-x86_64.zip"
+          Remove-Item -Recurse -Force $stage
           Get-Item "dist\Starfield-Data-Analysis-windows-x86_64.zip" | Select-Object Name, Length
 
-      - name: ZIP gegenpruefen (kein inneres Archiv)
+      - name: ZIP gegenpruefen (kein inneres Archiv, Ordner als Wurzel)
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
           Add-Type -AssemblyName System.IO.Compression.FileSystem
           $zip = [System.IO.Compression.ZipFile]::OpenRead((Resolve-Path "dist\Starfield-Data-Analysis-windows-x86_64.zip"))
           try {
-            $inner = $zip.Entries | Where-Object { $_.Name -match '\.(zip|7z|rar|tar|gz|whl|pyz)$' }
             Write-Host "Eintraege im ZIP: $($zip.Entries.Count)"
+            $inner = $zip.Entries | Where-Object { $_.Name -match '\.(zip|7z|rar|tar|gz|whl|pyz)$' }
             if ($inner) {
               $inner | ForEach-Object { Write-Host "VERSTOSS: $($_.FullName)" }
               throw "Das ZIP enthaelt ein eingebettetes Archiv."
             }
             Write-Host "OK: kein inneres Archiv im ZIP."
+
+            # Die Ordnerstruktur muss erhalten sein: alles unter
+            # StarfieldDataAnalysis\, sonst laeuft der Installer nicht.
+            $bad = $zip.Entries | Where-Object { $_.FullName -notlike "StarfieldDataAnalysis/*" }
+            if ($bad) {
+              $bad | ForEach-Object { Write-Host "VERSTOSS: $($_.FullName)" }
+              throw "Das ZIP hat keine Ordnerwurzel StarfieldDataAnalysis."
+            }
+            $names = $zip.Entries | ForEach-Object { Split-Path $_.FullName -Leaf }
+            foreach ($need in @("StarfieldDataAnalysis.exe", "sfda.exe", "SHA256SUMS", "README.md")) {
+              if ($names -notcontains $need) { throw "Im ZIP fehlt: $need" }
+            }
+            Write-Host "OK: Ordnerwurzel und Pflichtdateien vorhanden."
           } finally {
             $zip.Dispose()
           }
