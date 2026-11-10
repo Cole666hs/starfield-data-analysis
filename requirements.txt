@@ -1,4 +1,4 @@
-# Starfield Data Analysis 1.0.0 — runtime and build dependencies
+# Starfield Data Analysis 1.6.0 — runtime and build dependencies
 # Verified combination (05.11.2026, Python 3.13/3.14, Linux and Windows)
 PySide6==6.11.2
 QDarkStyle==3.2.3

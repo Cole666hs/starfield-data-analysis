@@ -146,7 +146,13 @@ def cmd_save_info(args) -> int:
     # R1_6: die oeffentliche Sicht kommt aus public_header_view() — ohne
     # Spielername, Ort, Rasse und Spielzeit (O-5, W-1). Der absolute Pfad
     # des Saves wird nicht ausgegeben (F-2).
-    public_header = public_header_view(header)
+    #
+    # O-7: Die frueher hier berechnete (und nie verwendete) Variable
+    # ``public_header`` ist entfernt. Sie war eine tote Zuweisung; der
+    # Kommentar behauptete eine Absicherung, die an dieser Stelle nicht
+    # stattfand. Der Block liest die vier Werte direkt aus ``header`` —
+    # das ist zulaessig, weil alle vier in ``PUBLIC_HEADER_FIELDS``
+    # stehen (also keine Identitaet tragen).
     payload = {
         "container": container.to_dict(),
         "savegame": {

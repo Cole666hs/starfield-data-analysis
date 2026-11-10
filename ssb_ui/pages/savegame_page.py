@@ -22,55 +22,132 @@ from pathlib import Path
 
 from ssb_i.errors import public_error
 from ssb_i.savegame_provider import player_view_text, public_header_view
+from ssb_ui.theme import (
+
+    ACCENT,
+    CARD,
+    CARD_EDGE,
+    FIELD,
+    MONO_FAMILY_CSS,
+    ON_ACCENT,
+    ROW_ALT,
+    STATUS_FAIL,
+    STATUS_INFO,
+    STATUS_OK,
+    STATUS_WARN,
+    SURFACE,
+    TEXT,
+    TEXT_DIM,
+    TEXT_FAINT,
+    body_font,
+    display_width_meter,
+    mono_font,
+    status_color,
+)
 
 from PySide6.QtCore import Qt, QByteArray
-from PySide6.QtGui import QFont, QColor
+from PySide6.QtGui import QFont, QColor, QSyntaxHighlighter, QTextCharFormat
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QPushButton,
     QLabel, QFileDialog, QFrame, QPlainTextEdit, QTabWidget,
     QTreeWidget, QTreeWidgetItem, QSplitter, QMessageBox,
 )
 
-# Cyberpunk accent colors (mirror of app.py — kept local for self-containment)
-ACCENT_CYAN = "#00E5FF"
-ACCENT_PINK = "#FF1F8F"
-ACCENT_AMBER = "#FFB300"
-ACCENT_GREEN = "#39FF14"
-DARK_BG = "#0A0E14"
-PANEL_BG = "#131822"
-GRID_LINE = "#1F2937"
-TEXT_MAIN = "#E8F0FF"
-TEXT_DIM = "#7E8AA0"
+#: Alte Namen bleiben als Aliase erhalten — sie werden in mehreren Dateien
+#: benutzt. Die Werte sind jetzt die neutralen aus ``ssb_ui.theme``.
+DARK_BG = SURFACE
+PANEL_BG = CARD
+GRID_LINE = CARD_EDGE
+TEXT_MAIN = TEXT
+ACCENT_CYAN = ACCENT
+ACCENT_PINK = STATUS_FAIL
+ACCENT_AMBER = STATUS_WARN
+ACCENT_GREEN = STATUS_OK
+
+
+# =============================================================================
+# Status-Highlighter fuer die Integritaetsuebersicht
+# =============================================================================
+class IntegrityStatusHighlighter(QSyntaxHighlighter):
+    """Faerbt die Statuswoerter der Integritaetsuebersicht semantisch ein.
+
+    Vorher war die Uebersicht reiner Text: PASS, WARNING und FAILED waren
+    an einem Blick nicht unterscheidbar. Hier traegt die Farbe eine
+    **Bedeutung** — sie ist an den geschlossenen Statusvokabular gebunden
+    (``ssb_ui.theme.STATUS_COLORS``). Ein unbekanntes Wort bekommt keine
+    erfundene Farbe, sondern bleibt neutral.
+
+    Das Highlighter aendert den Text **nicht**: ``toPlainText()`` liefert
+    unveraendert dieselben Zeilen wie vorher. Nur die Darstellung aendert
+    sich.
+    """
+
+    #: Reihenfolge = Prioritaet. FAILED wird vor PASS geprueft, damit
+    #: "NOT_CHECKED" nicht als "CHECKED" gelesen wird und "FAILED" nicht
+    #: an "PASS" scheitert.
+    STATUS_WORDS = ("FAILED", "WARNING", "NOT_CHECKED", "UNKNOWN", "PASS")
+
+    def __init__(self, document):
+        super().__init__(document)
+        self._formats = {}
+        for status in self.STATUS_WORDS:
+            fmt = QTextCharFormat()
+            fmt.setForeground(QColor(status_color(status)))
+            self._formats[status] = fmt
+
+    def highlightBlock(self, text: str) -> None:  # noqa: N802 (Qt-Namenskonvention)
+        for status in self.STATUS_WORDS:
+            start = 0
+            while True:
+                index = text.find(status, start)
+                if index < 0:
+                    break
+                before = text[index - 1] if index else " "
+                after_index = index + len(status)
+                after = text[after_index] if after_index < len(text) else " "
+                # Nur ganze Woerter — "PASS" in "PASSED" faellt nicht darunter.
+                if not before.isalnum() and not after.isalnum():
+                    self.setFormat(index, len(status), self._formats[status])
+                start = index + 1
 
 
 # =============================================================================
 # Card / panel widget — generic container with title + body
 # =============================================================================
 class CyberPanel(QFrame):
-    """Card-style container with cyan border on top + title label."""
+    """Card-style container with a neutral surface and a quiet title label.
+
+    Frueher hatte jede Karte einen cyanfarbenen Rand oben und eine
+    cyanfarbene Ueberschrift. Das war Dekoration ohne Bedeutung: alle drei
+    Karten (Player, BCPS, Plugins) sahen gleich wichtig aus, die
+    visuelle Hierarchie war damit flau. Jetzt traegt nur die Karte als
+    solche eine neutrale Flaeche; die Akzentfarbe ist aktiven Zustaenden
+    vorbehalten.
+    """
+
     def __init__(self, title: str, parent=None):
         super().__init__(parent)
         self.setStyleSheet(f"""
             QFrame {{
-                background-color: {PANEL_BG};
-                border: 1px solid {GRID_LINE};
-                border-top: 2px solid {ACCENT_CYAN};
-                border-radius: 0;
+                background-color: {CARD};
+                border: 1px solid {CARD_EDGE};
+                border-radius: 3px;
             }}
             QLabel#cardTitle {{
-                color: {ACCENT_CYAN};
-                font-family: "Cascadia Code", monospace;
-                font-size: 10pt;
+                color: {TEXT_DIM};
+                font-family: {MONO_FAMILY_CSS};
+                font-size: 9pt;
                 font-weight: bold;
-                letter-spacing: 2px;
-                padding: 4px 0;
+                letter-spacing: 1px;
+                padding: 2px 0;
             }}
         """)
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(14, 10, 14, 14)
+        layout.setContentsMargins(14, 10, 14, 12)
         layout.setSpacing(8)
         title_label = QLabel(title.upper())
         title_label.setObjectName("cardTitle")
+        title_label.setFont(mono_font(9, bold=True))
         layout.addWidget(title_label)
         self.body_layout = layout
 
@@ -102,17 +179,18 @@ class SavegamePage(QWidget):
         # Toolbar
         toolbar = QHBoxLayout()
         open_btn = QPushButton("▣  Open .sfs File...")
-        open_btn.setStyleSheet(self._btn_style(ACCENT_CYAN))
+        # Die Hauptaktion ist die einzige akzentfarbige Flaeche der Seite.
+        open_btn.setStyleSheet(self._primary_btn_style())
         open_btn.clicked.connect(self.on_open)
         toolbar.addWidget(open_btn)
 
         diff_btn = QPushButton("⇄  Diff vs another save...")
-        diff_btn.setStyleSheet(self._btn_style(ACCENT_PINK))
+        diff_btn.setStyleSheet(self._btn_style(ACCENT))
         diff_btn.clicked.connect(self.on_diff)
         toolbar.addWidget(diff_btn)
 
         report_btn = QPushButton("⤓  Save Report (JSON)...")
-        report_btn.setStyleSheet(self._btn_style(ACCENT_AMBER))
+        report_btn.setStyleSheet(self._btn_style(ACCENT))
         report_btn.clicked.connect(self.on_save_report)
         toolbar.addWidget(report_btn)
         toolbar.addStretch(1)
@@ -120,7 +198,7 @@ class SavegamePage(QWidget):
 
         # Status row
         self.status_label = QLabel("No file loaded · pick a .sfs file to begin")
-        self.status_label.setStyleSheet(f"color: {TEXT_DIM}; font-family: 'Cascadia Code';")
+        self.status_label.setStyleSheet(f"color: {TEXT_DIM}; font-family: {MONO_FAMILY_CSS};")
         root.addWidget(self.status_label)
 
         # Top grid: 3 cards
@@ -149,10 +227,15 @@ class SavegamePage(QWidget):
         player_font.setStyleHint(QFont.Monospace)
         player_font.setPointSize(10)
         self.player_view.setFont(player_font)
+        # O-7: Der Breitenmesser misst die **Anzeigebreite** ueber
+        # QFontMetrics. Ohne ihn richtet die zweispaltige Karte nach
+        # Zeichenzahl aus — Breitzeichen (CJK, Emoji) belegen dort zwei
+        # Spalten und ruecken die rechte Spalte nach links.
+        self._player_width = display_width_meter(player_font)
         self.player_view.setStyleSheet(
             f"QPlainTextEdit {{ background-color: {PANEL_BG}; color: {TEXT_MAIN};"
-            f" border: none; selection-background-color: {ACCENT_CYAN};"
-            f" selection-color: {DARK_BG}; }}")
+            f" border: none; selection-background-color: {ACCENT};"
+            f" selection-color: {ON_ACCENT}; }}")
         self.player_view.setMinimumHeight(232)
         self.player_card.add_widget(self.player_view)
         grid.addWidget(self.player_card, 0, 0, 1, 3)
@@ -163,7 +246,7 @@ class SavegamePage(QWidget):
         # Card 2: Container metadata
         self.container_card = CyberPanel("BCPS Container")
         self.container_label = QLabel("—")
-        self.container_label.setStyleSheet(f"color: {TEXT_MAIN}; font-family: 'Cascadia Code'; font-size: 10pt;")
+        self.container_label.setStyleSheet(f"color: {TEXT_MAIN}; font-family: {MONO_FAMILY_CSS}; font-size: 10pt;")
         self.container_label.setWordWrap(True)
         self.container_card.add_widget(self.container_label)
         # Die Karte teilt sich die Zeile mit der Plugin-Liste und wird dabei
@@ -179,14 +262,18 @@ class SavegamePage(QWidget):
         self.plugins_tree.setRootIsDecorated(False)
         self.plugins_tree.setStyleSheet(f"""
             QTreeWidget {{
-                background-color: {DARK_BG};
-                color: {TEXT_MAIN};
-                border: 1px solid {GRID_LINE};
-                font-family: "Cascadia Code", monospace;
+                background-color: {FIELD};
+                color: {TEXT};
+                border: none;
+                font-family: {MONO_FAMILY_CSS};
                 font-size: 9pt;
             }}
             QTreeWidget::item {{ padding: 2px; }}
-            QTreeWidget::item:alternate {{ background-color: #0e131c; }}
+            QTreeWidget::item:alternate {{ background-color: {ROW_ALT}; }}
+            QTreeWidget::item:selected {{
+                background-color: {ACCENT};
+                color: {ON_ACCENT};
+            }}
         """)
         self.plugins_tree.setAlternatingRowColors(True)
         # Spaltenbreiten: ohne sie schneidet Qt die Namen auf "Starfield.e..." ab
@@ -195,7 +282,7 @@ class SavegamePage(QWidget):
         self.plugins_tree.setMinimumHeight(160)
         self.plugins_count_label = QLabel("—")
         self.plugins_count_label.setStyleSheet(
-            f"color: {TEXT_DIM}; font-family: 'Cascadia Code'; font-size: 8pt;")
+            f"color: {TEXT_DIM}; font-family: {MONO_FAMILY_CSS}; font-size: 8pt;")
         self.plugins_count_label.setWordWrap(True)
         self.plugins_card.add_widget(self.plugins_count_label)
         self.plugins_card.add_widget(self.plugins_tree)
@@ -219,11 +306,14 @@ class SavegamePage(QWidget):
                 padding: 8px 18px;
                 border: 1px solid {GRID_LINE};
                 border-bottom: none;
-                font-family: "Cascadia Code", monospace;
+                font-family: {MONO_FAMILY_CSS};
             }}
             QTabBar::tab:selected {{
-                color: {ACCENT_CYAN};
-                border-bottom: 2px solid {ACCENT_CYAN};
+                color: {TEXT};
+                border-bottom: 2px solid {ACCENT};
+            }}
+            QTabBar::tab:hover {{
+                color: {TEXT};
             }}
         """)
 
@@ -235,7 +325,7 @@ class SavegamePage(QWidget):
                 background-color: {DARK_BG};
                 color: {TEXT_MAIN};
                 border: none;
-                font-family: "Cascadia Code", monospace;
+                font-family: {MONO_FAMILY_CSS};
                 font-size: 10pt;
                 padding: 10px;
             }}
@@ -250,7 +340,7 @@ class SavegamePage(QWidget):
                 background-color: {DARK_BG};
                 color: {TEXT_MAIN};
                 border: none;
-                font-family: "Cascadia Code", monospace;
+                font-family: {MONO_FAMILY_CSS};
                 font-size: 10pt;
                 padding: 10px;
             }}
@@ -261,6 +351,10 @@ class SavegamePage(QWidget):
         self.integrity_view = QPlainTextEdit()
         self.integrity_view.setReadOnly(True)
         self.integrity_view.setStyleSheet(self._mono_style())
+        # Die Statuswoerter werden semantisch eingefaerbt. Der Highlighter
+        # aendert den Text nicht — er aendert nur die Darstellung.
+        self.integrity_highlighter = IntegrityStatusHighlighter(
+            self.integrity_view.document())
         self.tabs.addTab(self.integrity_view, "Integrity")
 
         # String-Pool-Tab: Zusammenfassung sofort, volle Liste nur auf Klick.
@@ -270,11 +364,11 @@ class SavegamePage(QWidget):
         strings_layout.setSpacing(6)
         self.strings_summary = QLabel("No file loaded")
         self.strings_summary.setStyleSheet(
-            f"color: {TEXT_DIM}; font-family: 'Cascadia Code'; font-size: 9pt;")
+            f"color: {TEXT_DIM}; font-family: {MONO_FAMILY_CSS}; font-size: 9pt;")
         self.strings_summary.setWordWrap(True)
         strings_layout.addWidget(self.strings_summary)
         self.strings_load_btn = QPushButton("Load strings (read-only)")
-        self.strings_load_btn.setStyleSheet(self._btn_style(ACCENT_CYAN))
+        self.strings_load_btn.setStyleSheet(self._btn_style(ACCENT))
         self.strings_load_btn.clicked.connect(self.on_load_strings)
         self.strings_load_btn.setEnabled(False)
         strings_layout.addWidget(self.strings_load_btn, alignment=Qt.AlignLeft)
@@ -292,33 +386,68 @@ class SavegamePage(QWidget):
     def _mono_style(self) -> str:
         return f"""
             QPlainTextEdit {{
-                background-color: {DARK_BG};
-                color: {TEXT_MAIN};
+                background-color: {FIELD};
+                color: {TEXT};
                 border: none;
-                font-family: "Cascadia Code", monospace;
+                font-family: {MONO_FAMILY_CSS};
                 font-size: 10pt;
                 padding: 10px;
             }}
         """
 
     def _btn_style(self, accent: str) -> str:
+        """Neutraler Button.
+
+        ``accent`` wird **nicht** mehr als Text- und Rahmenfarbe
+        verwendet. Drei Buttons in drei Farben (cyan/pink/amber) waren
+        Dekoration ohne Bedeutung — sie signalisierten nichts, weil es
+        keine Prioritaet oder Gefahrenstufe gibt. Der Parameter bleibt in
+        der Signatur, damit Aufrufer unveraendert bleiben; die
+        Akzentfarbe wird nur noch fuer den Fokus verwendet.
+        """
         return f"""
             QPushButton {{
                 background-color: transparent;
-                color: {accent};
-                border: 1px solid {accent};
-                padding: 8px 16px;
-                font-family: "Cascadia Code", monospace;
-                font-weight: bold;
-                letter-spacing: 1px;
+                color: {TEXT};
+                border: 1px solid {CARD_EDGE};
+                padding: 7px 14px;
+                font-family: {MONO_FAMILY_CSS};
             }}
             QPushButton:hover {{
-                background-color: {accent};
-                color: {DARK_BG};
+                border-color: {ACCENT};
+                color: {ACCENT};
+            }}
+            QPushButton:focus {{
+                border-color: {ACCENT};
             }}
             QPushButton:pressed {{
-                background-color: {accent};
-                color: {DARK_BG};
+                background-color: {CARD_EDGE};
+            }}
+            QPushButton:disabled {{
+                color: {TEXT_FAINT};
+                border-color: {CARD_EDGE};
+            }}
+        """
+
+    def _primary_btn_style(self) -> str:
+        """Die eine ausgewaehlte Aktion der Seite."""
+        return f"""
+            QPushButton {{
+                background-color: {ACCENT};
+                color: {ON_ACCENT};
+                border: 1px solid {ACCENT};
+                padding: 7px 14px;
+                font-family: {MONO_FAMILY_CSS};
+                font-weight: bold;
+            }}
+            QPushButton:hover {{
+                background-color: {ACCENT};
+                color: {ON_ACCENT};
+                border-color: {ACCENT};
+            }}
+            QPushButton:pressed {{
+                background-color: {CARD_EDGE};
+                color: {TEXT};
             }}
         """
 
@@ -361,7 +490,7 @@ class SavegamePage(QWidget):
             self.header = None
             self.plugins = None
             self.status_label.setText(
-                f"<span style='color:{ACCENT_PINK}'>● Decode failed</span> "
+                f"<span style='color:{STATUS_FAIL}'>● Decode failed</span> "
                 f"<span style='color:{TEXT_DIM}'>{public_error(e)}</span>"
             )
             if show_dialog:
@@ -393,7 +522,8 @@ class SavegamePage(QWidget):
         else:
             # Fail-closed: lieber nichts anzeigen als eine erfundene Liste.
             item = QTreeWidgetItem(["plugin list not decoded", "—"])
-            item.setForeground(0, QColor(ACCENT_AMBER))
+            # Semantisch: die Liste konnte nicht gelesen werden.
+            item.setForeground(0, QColor(STATUS_WARN))
             self.plugins_tree.addTopLevelItem(item)
             self.plugins_count_label.setText(
                 "UNVERIFIED · %s" % (getattr(info, "note", "") or "unbekannt"))
@@ -429,7 +559,7 @@ class SavegamePage(QWidget):
         # R1_6 / O-9: die Statuszeile nennt keinen Dateinamen und keinen
         # Pfad mehr.
         self.status_label.setText(
-            f"<span style='color:{ACCENT_GREEN}'>● Loaded</span> "
+            f"<span style='color:{STATUS_OK}'>● Loaded</span> "
             f"<span style='color:{TEXT_DIM}'>({size_mb:.2f} MB decompressed · {container.chunk_count} chunks)</span>"
         )
         return True
@@ -605,7 +735,10 @@ class SavegamePage(QWidget):
         Statusausgaben (Statuszeile, Header-Dump, Export, CLI) nutzen
         weiterhin ``public_header_view()``.
         """
-        return player_view_text(h, columns=2)
+        # O-7: Der Breitenmesser kommt aus der GUI-Schicht — der
+        # Provider bleibt Qt-frei (siehe ssb_i/savegame_provider.py).
+        return player_view_text(h, columns=2,
+                                display_width=getattr(self, "_player_width", None))
 
     def _format_container(self, c) -> str:
         return (
@@ -631,25 +764,27 @@ class SavegamePage(QWidget):
                        entry=None):
         marker = "★ " if is_native else "  "
         item = QTreeWidgetItem([f"{marker}{name}", ptype])
-        if is_native:
-            item.setForeground(0, QColor(ACCENT_AMBER))
-        else:
-            item.setForeground(0, QColor(ACCENT_CYAN))
+        # Native Plugins tragen das ★-Zeichen — das ist die Kennzeichnung.
+        # Eine eigene Zeilenfarbe waere Dekoration ohne Bedeutung: sie
+        # wuerde eine Kategorie (Vanilla/Mod) farblich kodieren, obwohl
+        # beides gleich gueltige Plugins sind. Der Text bleibt einheitlich.
         self.plugins_tree.addTopLevelItem(item)
         # Metadaten nur, wenn tatsaechlich vorhanden (nie Platzhalter zeigen).
         state = getattr(entry, "metadata_state", "absent") if entry else "absent"
         if state == "present":
-            details = ["creation: %s" % (entry.creation_name or "-")]
+            details = [f"creation: {entry.creation_name or '-'}"]
             if entry.creation_id:
-                details.append("id: %s" % entry.creation_id)
+                details.append(f"id: {entry.creation_id}")
             if entry.version:
-                details.append("version: %s" % entry.version)
+                details.append(f"version: {entry.version}")
             if entry.achievement_friendly:
                 details.append("achievement friendly")
             child = QTreeWidgetItem(["    " + " | ".join(details), ""])
-            child.setForeground(0, QColor(ACCENT_GREEN))
+            # Hier traegt die Farbe eine Bedeutung: Metadaten vorhanden.
+            child.setForeground(0, QColor(STATUS_OK))
             item.addChild(child)
         elif state == "unreadable":
             child = QTreeWidgetItem(["    metadata unreadable", ""])
-            child.setForeground(0, QColor(ACCENT_PINK))
+            # Ebenso semantisch: die Metadaten konnten nicht gelesen werden.
+            child.setForeground(0, QColor(STATUS_FAIL))
             item.addChild(child)

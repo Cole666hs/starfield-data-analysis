@@ -125,7 +125,7 @@ def test_public_identity_is_consistent(app_module):
     assert PRODUCT_NAME == "Starfield Data Analysis"
     assert PRODUCT_SUBTITLE == "Advanced Starfield Inspection & Analysis Toolkit"
     assert DEVELOPER == "Entropy Development"
-    assert VERSION == "1.5.3"   # 08.11.2026: Medium-Kette, Metadaten, Integritaet
+    assert VERSION == "1.6.0"   # 09.11.2026: O-7 — Playeransicht, Guard, Spaltenbreite
     assert app_module.APP_NAME == PRODUCT_NAME
     assert VERSION in app_module.SSBWorkbench().windowTitle()
 

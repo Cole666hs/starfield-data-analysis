@@ -25,12 +25,19 @@ from PySide6.QtWidgets import (
     QPushButton, QVBoxLayout, QWidget,
 )
 
-ACCENT_CYAN = "#00E5FF"
-ACCENT_PINK = "#FF1F8F"
-ACCENT_AMBER = "#FFB300"
-TEXT_MAIN = "#E8F0FF"
-TEXT_DIM = "#7E8AA0"
-DARK_BG = "#0A0E14"
+# Die Palette liegt zentral in ``ssb_ui.theme`` (siehe savegame_page.py).
+from ssb_ui.theme import (
+    MONO_FAMILY_CSS,
+    ACCENT, CARD, CARD_EDGE, FIELD, ON_ACCENT, ROW_ALT, STATUS_FAIL,
+    STATUS_INFO, STATUS_OK, STATUS_WARN, SURFACE, TEXT, TEXT_DIM, TEXT_FAINT,
+    mono_font,
+)
+
+ACCENT_CYAN = ACCENT
+ACCENT_PINK = STATUS_FAIL
+ACCENT_AMBER = STATUS_WARN
+TEXT_MAIN = TEXT
+DARK_BG = SURFACE
 
 #: Bytes pro Anzeigeseite (16 Zeilen à 16 Byte = 256 Byte wären zu klein;
 #: 8192 Byte = 512 Zeilen ist flüssig zu rendern)
@@ -134,13 +141,10 @@ class HexViewPage(QWidget):
         self.view = QPlainTextEdit()
         self.view.setReadOnly(True)
         self.view.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
-        font = QFont("Cascadia Code")
-        font.setStyleHint(QFont.StyleHint.Monospace)
-        font.setPointSize(10)
-        self.view.setFont(font)
+        self.view.setFont(mono_font(10))
         self.view.setStyleSheet(
-            f"QPlainTextEdit {{ background-color:{DARK_BG}; color:{TEXT_MAIN};"
-            f" border:1px solid #1F2937; padding:8px; }}"
+            f"QPlainTextEdit {{ background-color:{FIELD}; color:{TEXT};"
+            f" border:1px solid {CARD_EDGE}; padding:8px; }}"
         )
         root.addWidget(self.view, stretch=1)
 
@@ -149,13 +153,26 @@ class HexViewPage(QWidget):
 
     # ------------------------------------------------------------------ Optik
     def _style_buttons(self) -> None:
-        for btn, color in ((self.btn_reload, ACCENT_CYAN), (self.btn_open, ACCENT_CYAN),
-                           (self.btn_goto, ACCENT_AMBER), (self.btn_search, ACCENT_PINK),
-                           (self.btn_prev, TEXT_DIM), (self.btn_next, TEXT_DIM)):
+        """Einheitliche, neutrale Buttons.
+
+        Vorher hatte jeder Button eine eigene Farbe (cyan/amber/pink) — das
+        war Dekoration ohne Bedeutung: die Farben kodierten weder
+        Prioritaet noch eine Gefahrenstufe. Die Navigation (Back/Forward)
+        war zusaetzlich in einem dritten, grauen Ton gesetzt. Jetzt sind
+        alle Buttons gleich; die Akzentfarbe erscheint nur bei Fokus und
+        Hover.
+        """
+        for btn in (self.btn_reload, self.btn_open, self.btn_goto,
+                    self.btn_search, self.btn_prev, self.btn_next):
             btn.setStyleSheet(
-                f"QPushButton {{ background:#131822; color:{color};"
-                f" border:1px solid {color}; padding:6px 12px; }}"
-                f"QPushButton:hover {{ background:#1a212e; }}"
+                f"QPushButton {{ background:{CARD}; color:{TEXT};"
+                f" border:1px solid {CARD_EDGE}; padding:6px 12px;"
+                f" font-family: {MONO_FAMILY_CSS}; }}"
+                f"QPushButton:hover {{ border-color:{ACCENT}; color:{ACCENT}; }}"
+                f"QPushButton:focus {{ border-color:{ACCENT}; }}"
+                f"QPushButton:pressed {{ background:{ROW_ALT}; }}"
+                f"QPushButton:disabled {{ color:{TEXT_FAINT};"
+                f" border-color:{CARD_EDGE}; }}"
             )
 
     # ---------------------------------------------------------------- Puffer

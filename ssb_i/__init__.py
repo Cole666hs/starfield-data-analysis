@@ -21,7 +21,12 @@ from __future__ import annotations
 import importlib
 from typing import Any
 
-__version__ = "1.0.0"          # version of this shipped package
+# O-9: The version lives in exactly one place (``ssb_i.product.VERSION``).
+# A second literal here was the reason the package reported 1.0.0 while the
+# CLI and the GUI reported 1.5.3. The import is lazy-safe: ``product`` has no
+# third-party dependencies.
+from .product import VERSION as __version__  # noqa: E402
+
 __product__ = "Starfield Data Analysis"
 
 #: Export name -> module that provides it.

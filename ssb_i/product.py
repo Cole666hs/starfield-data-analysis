@@ -18,8 +18,13 @@ PRODUCT_SUBTITLE = "Advanced Starfield Inspection & Analysis Toolkit"
 #: Developer / publisher shown in UI, CLI and documentation
 DEVELOPER = "Entropy Development"
 
-#: Release version of the product (not the internal library generation)
-VERSION = "1.5.3"
+#: Release version of the product (not the internal library generation).
+#:
+#: O-9: This is the **single source of truth** for the product version.
+#: The PyInstaller spec, the CLI (``--version``), the GUI window title and
+#: the documentation all derive from it. ``ssb_i.__version__`` is
+#: re-exported from here instead of carrying a second, drifting literal.
+VERSION = "1.6.0"
 
 #: Executable / archive base name (no spaces: safe for shells and archives)
 SLUG = "StarfieldDataAnalysis"

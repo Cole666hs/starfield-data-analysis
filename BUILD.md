@@ -47,7 +47,7 @@ PyInstaller 6.22.2; the full build takes about 65 seconds. The same steps work o
        dist/StarfieldDataAnalysis/sfda --version
        dist/StarfieldDataAnalysis/StarfieldDataAnalysis --dump-pages --out pages.txt
 
-   `--version` prints `sfda 1.0.0 - Starfield Data Analysis (Entropy Development)`. `--dump-pages`
+   `--version` prints `sfda 1.6.0 - Starfield Data Analysis (Entropy Development)`. `--dump-pages`
    writes the page inventory and exits without opening a window, which is what I use on a headless
    machine to prove a package is intact. On Windows, use the `.exe` paths.
 

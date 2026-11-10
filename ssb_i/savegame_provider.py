@@ -8,7 +8,7 @@ Provenance: all operations are READ-ONLY over local .sfs files.
 """
 from __future__ import annotations
 
-import datetime, os, struct, zlib, json, hashlib
+import datetime, math, os, struct, zlib, json, hashlib
 from dataclasses import dataclass, field, asdict, fields
 from typing import Any, BinaryIO, Iterable, Mapping
 
@@ -230,6 +230,10 @@ def public_header_view(header: DatHeader) -> dict[str, Any]:
 PLAYER_VIEW_MISSING = "(nicht im Save vorhanden)"
 PLAYER_VIEW_EMPTY = "(leer)"
 PLAYER_VIEW_UNASSIGNED = "(nicht zugeordnet)"
+#: O-7: Nicht-endliche Zahlen (NaN, +inf, -inf) sind **kein** Messwert.
+#: Sie werden sichtbar als ungueltig gekennzeichnet — nie stillschweigend
+#: zu 0, "" oder einer scheinbar gueltigen Zahl gemacht.
+PLAYER_VIEW_NOT_FINITE = "(nicht endlich)"
 
 _FILETIME_EPOCH = datetime.datetime(1601, 1, 1, tzinfo=datetime.timezone.utc)
 
@@ -347,6 +351,10 @@ def _player_scalar(kind: str, value: Any) -> str:
         if isinstance(value, int):
             return "%d" % value
         if isinstance(value, float):
+            # O-7: Nicht-endliche Werte sind kein Messwert. Sie werden
+            # gekennzeichnet, nicht stillschweigend zu 0 gerundet.
+            if not math.isfinite(value):
+                return "%s (%s)" % (PLAYER_VIEW_NOT_FINITE, _float_kind(value))
             return "%.6g" % value
         if isinstance(value, str):
             text = value.strip("\x00")
@@ -366,12 +374,28 @@ def _player_scalar(kind: str, value: Any) -> str:
     if kind == "float":
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             return PLAYER_VIEW_UNASSIGNED
+        # O-7: Nicht-endliche Werte (NaN, +inf, -inf) sind kein Messwert.
+        # Sie werden als solche gekennzeichnet — nie zu 0, "" oder einer
+        # scheinbar gueltigen Zahl gemacht.
+        if not math.isfinite(float(value)):
+            return "%s (%s)" % (PLAYER_VIEW_NOT_FINITE, _float_kind(value))
         return "%.3f" % float(value)
     # text / version — beliebiger Text, aber kein erfundener Ersatzwert
     if not isinstance(value, str):
         return PLAYER_VIEW_UNASSIGNED
     text = value.strip("\x00")
     return text if text else PLAYER_VIEW_EMPTY
+
+
+def _float_kind(value: float) -> str:
+    """Art eines nicht-endlichen Wertes — ``NaN``, ``+inf`` oder ``-inf``.
+
+    Die Art wird genannt, damit ``NaN`` und ``+inf`` unterscheidbar sind
+    und der Wert nicht wie eine gewoehnliche Zahl wirkt.
+    """
+    if math.isnan(value):
+        return "NaN"
+    return "+inf" if value > 0 else "-inf"
 
 
 def format_player_value(item: PlayerField, value: Any) -> str:
@@ -412,13 +436,25 @@ def player_view_sections(header: DatHeader) -> list[tuple[str, list[tuple[str, s
 
 
 def player_view_text(header: DatHeader, *, label_width: int = 20,
-                     columns: int = 1, gutter: str = "    ") -> str:
+                     columns: int = 1, gutter: str = "    ",
+                     display_width=None) -> str:
     """Die Spieleransicht als Textblock (GUI-Karte und Tests nutzen diesen Weg).
 
     ``columns=2`` stellt die Abschnitte nebeneinander statt untereinander.
     Das setzt eine **Monospace**-Schrift voraus — dann bleibt die
     Spaltenausrichtung erhalten und die Karte bleibt flach genug, um ohne
     Scrollen vollstaendig sichtbar zu sein.
+
+    ``display_width`` ist ein optionaler **Breitenmesser**: eine Funktion
+    ``(text) -> int``, die die *Anzeigebreite* eines Textes liefert (z. B.
+    ueber ``QFontMetrics.horizontalAdvance``). Wird sie nicht uebergeben,
+    gilt ``len(text)`` — das ist fuer ASCII korrekt, aber **nicht** fuer
+    Breitzeichen (CJK, Emoji): die dort 2 Anzeigebreiten belegen, rutscht
+    die rechte Spalte.
+
+    Der Provider bleibt bewusst **Qt-frei** (``ssb_i`` haengt nicht an
+    PySide6). Die Messung gehoert deshalb in die GUI-Schicht und wird
+    hier nur als Parameter hereingereicht.
     """
     blocks = [_render_block(title, rows, label_width)
               for title, rows in player_view_sections(header)]
@@ -426,7 +462,15 @@ def player_view_text(header: DatHeader, *, label_width: int = 20,
         return ""
     if columns <= 1 or len(blocks) < 2:
         return "\n\n".join("\n".join(block) for block in blocks)
-    widths = [max((len(line) for line in block), default=0) for block in blocks]
+    width_of = display_width if display_width is not None else len
+    widths = [max((width_of(line) for line in block), default=0)
+              for block in blocks]
+    # O-7: Padding muss in **derselben Einheit** gerechnet werden wie die
+    # Breite. ``width_of`` liefert Anzeigebreiten (Pixel), das Padding
+    # ergaenzt aber Leerzeichen (Zeichen). Deshalb wird die Breite eines
+    # Leerzeichens gemessen und die Zahl der noetigen Leerzeichen daraus
+    # berechnet — sonst wird die Zelle um ein Vielfaches zu breit.
+    space_width = width_of(" ")
     height = max(len(block) for block in blocks)
     lines: list[str] = []
     for index in range(height):
@@ -434,7 +478,16 @@ def player_view_text(header: DatHeader, *, label_width: int = 20,
         for position, block in enumerate(blocks):
             cell = block[index] if index < len(block) else ""
             if position < len(blocks) - 1:
-                cell = cell.ljust(widths[position])
+                # Die Zelle wird auf die **Anzeigebreite** aufgefuellt —
+                # nicht auf die Zeichenzahl. Sonst verschieben
+                # Breitzeichen (CJK, Emoji) die rechte Spalte.
+                pad = widths[position] - width_of(cell)
+                if pad > 0:
+                    if space_width > 0:
+                        count = pad // space_width
+                    else:
+                        count = pad
+                    cell = cell + " " * count
             cells.append(cell)
         lines.append(gutter.join(cells).rstrip())
     return "\n".join(lines)

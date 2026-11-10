@@ -188,6 +188,115 @@ BUILTIN_NUMERIC = {"int", "float", "bool", "complex"}
 BUILTIN_TEXT = {"str"}
 
 
+# ------------------------------------------------------------- O-7
+#: R1_6/O-7: **Sensitivitaetsklassen** der Headerfelder.
+#:
+#: Das ist die zentrale Zuordnung: jedes Feld des Save-Headers wird genau
+#: einer Klasse zugeordnet. Die Zuordnung ist **explizit** — es gibt keine
+#: Namens- oder Typheuristik. Ein Feld, das nicht in dieser Tabelle steht,
+#: gilt als ``UNKNOWN`` und wird nicht automatisch freigegeben.
+#:
+#: Klassen:
+#:   ``IDENTITY``  — Spielidentitaet (Name, Ort, Rasse, Spielzeit).
+#:                  Darf **nur** in der ausdruecklich erlaubten
+#:                  Spieler-Analyseansicht erscheinen.
+#:   ``PUBLIC``    — technische Metadaten ohne Identitaet. Duerfen in
+#:                  oeffentlichen Diagnose-, Fehler-, Status-, Export-
+#:                  und Report-Kanaelen erscheinen.
+#:   ``UNKNOWN``   — nicht zugeordnet. Wird **nicht** freigegeben.
+SENSITIVITY_IDENTITY = "IDENTITY"
+SENSITIVITY_PUBLIC = "PUBLIC"
+SENSITIVITY_UNKNOWN = "UNKNOWN"
+
+#: Zuordnung Feldname -> Sensitivitaetsklasse.
+#:
+#: Beleg: die Felder mit ``IDENTITY`` stehen exakt in
+#: ``ssb_i.savegame_differential.IDENTITY_FIELDS``; die Felder mit
+#: ``PUBLIC`` exakt in ``ssb_i.savegame_provider.PUBLIC_HEADER_FIELDS``.
+#: Beide Mengen sind im Code nachpruefbar. Der Test
+#: ``test_guard_sensitivitaetszuordnung_ist_konsistent`` prueft das
+#: gegen die laufenden Module — die Tabelle kann also nicht stillschweigend
+#: von der Quelle abweichen.
+#:
+#: ``gender`` ist bewusst ``PUBLIC``: es ist ein Zahlencode, kein Name.
+#: Es traegt damit keine Identitaet, ist aber **kein** Freifahrtschein —
+#: die Klasse bedeutet "kein Identitaetsbezug", nicht "in jedem Kanal
+#: unbedenklich".
+FIELD_SENSITIVITY: dict[str, str] = {
+    # -- Identitaet (nur in der Spieler-Analyseansicht erlaubt) ----------
+    "player_name": SENSITIVITY_IDENTITY,
+    "player_location": SENSITIVITY_IDENTITY,
+    "race_name": SENSITIVITY_IDENTITY,
+    "playtime": SENSITIVITY_IDENTITY,
+    # -- technische Metadaten (oeffentliche Kanaele erlaubt) -----------
+    "engine_version": SENSITIVITY_PUBLIC,
+    "save_version": SENSITIVITY_PUBLIC,
+    "save_version_2": SENSITIVITY_PUBLIC,
+    "save_number": SENSITIVITY_PUBLIC,
+    "player_level": SENSITIVITY_PUBLIC,
+    "gender": SENSITIVITY_PUBLIC,
+    "experience": SENSITIVITY_PUBLIC,
+    "experience_required": SENSITIVITY_PUBLIC,
+    "filetime": SENSITIVITY_PUBLIC,
+    "current_game_version": SENSITIVITY_PUBLIC,
+    "created_game_version": SENSITIVITY_PUBLIC,
+    "plugin_info_offset": SENSITIVITY_PUBLIC,
+    "plugin_info_size": SENSITIVITY_PUBLIC,
+}
+
+#: O-7: **Feldauflosung** — welche Headerfelder ein Formatter tatsaechlich
+#: liest.
+#:
+#: Der Guard kann den Datenfluss durch einen Formatter nicht im Allgemeinen
+#: verfolgen (der Aufruf laeuft in den Funktionskoerper, den der Guard nicht
+#: speichert). Fuer die *konkrete* Spieler-Analysekette ist er aber
+#: aufloesbar: die gelesenen Attribute sind statische Literale in
+#: ``PLAYER_VIEW_FIELDS``.
+#:
+#: Diese Tabelle nennt **nur** diese beiden Fakten:
+#:   1. welcher Formatter die Analyseansicht erzeugt,
+#:   2. welche Felder er liest.
+#:
+#: Sie ist damit **keine** Ausnahme fuer "Formatter-Ergebnisse" im
+#: Allgemeinen: ein anderer Formatter, der Identitaetsfelder liest, wird
+#: **nicht** freigegeben, weil er nicht in dieser Tabelle steht.
+ANALYSIS_VIEW_FORMATTERS = {
+    "player_view_text", "player_view_sections", "player_view_rows",
+}
+
+#: Die Felder, die die Analyseansicht liest. Beleg: statische Literale in
+#: ``PLAYER_VIEW_FIELDS`` (ssb_i/savegame_provider.py). Geprueft durch
+#: ``test_guard_analysesicht_felder_stimmen_mit_quelle_ueberein``.
+ANALYSIS_VIEW_FIELDS = frozenset({
+    "player_name", "player_level", "player_location", "playtime",
+    "race_name", "gender", "experience", "experience_required",
+    "filetime", "save_number", "save_version", "save_version_2",
+    "current_game_version", "created_game_version", "engine_version",
+    "header_size", "padding_end", "plugin_info_offset",
+    "plugin_info_size", "unknown_field_0",
+})
+
+
+def sensitivity_of(field: str) -> str:
+    """Sensitivitaetsklasse eines Feldnamens — **explizit**, keine Heuristik.
+
+    Unbekannte Felder sind ``UNKNOWN``: sie werden nicht automatisch
+    freigegeben. Das ist die fail-closed-Vorgabe aus O-7.
+    """
+    return FIELD_SENSITIVITY.get(field, SENSITIVITY_UNKNOWN)
+
+
+def analysis_view_reads_identity() -> bool:
+    """Liest die Analyseansicht Identitaetsfelder?
+
+    Belegt aus der Quelle, nicht angenommen: die Attribute der
+    Analysekette sind in :data:`ANALYSIS_VIEW_FIELDS` gelistet. Ist eines
+    davon ``IDENTITY``, ist die Identitaet in dieser Ansicht sichtbar.
+    """
+    return any(sensitivity_of(f) == SENSITIVITY_IDENTITY
+               for f in ANALYSIS_VIEW_FIELDS)
+
+
 # ------------------------------------------------------------- Helfer
 
 class Violation:
@@ -1058,6 +1167,15 @@ def check_file(path: Path, root: Path, guard: Guard) -> list[Violation]:
         for sub in ast.walk(scope):
             scope_of[id(sub)] = scope
 
+    # O-7: Methoden-Tabelle des Moduls (Methodenname -> Rumpf). Sie ermoeg-
+    # licht die Aufloesung einer Zwischenmethode, z. B.
+    # ``self.player_view.setPlainText(self._format_player(header))`` ->
+    # ``_format_player`` gibt ``player_view_text(...)`` zurueck.
+    methods: dict[str, ast.AST] = {}
+    for n in ast.walk(tree):
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            methods.setdefault(n.name, n)
+
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
@@ -1135,11 +1253,49 @@ def check_file(path: Path, root: Path, guard: Guard) -> list[Violation]:
                 resolved = _resolve_output_source(arg, scope)
                 if resolved is not None:
                     arg = resolved
+                # O-7: Sensitivitaetspruefung — welches **konkrete Feld**
+                # fliesst in diesen Kanal? Der Datenfluss wird nur dann
+                # aufgeloest, wenn der Aufruf ein Formatter aus
+                # ANALYSIS_VIEW_FORMATTERS ist (belegt ueber die
+                # statischen Literale in PLAYER_VIEW_FIELDS).
+                #
+                # Ist der Kanal nicht die ausdruecklich erlaubte
+                # Spieler-Analyseansicht und fliesst Identitaet hinein,
+                # ist das ein **ERROR**. Ist der Datenfluss nicht
+                # aufgeloest, bleibt der bisherige Herkunftsbefund
+                # unveraendert — der Guard behauptet nichts, was er nicht
+                # belegen kann.
+                identity_fields = _identity_fields_in_chain(
+                    arg, scope, local_types, methods=methods)
+                if identity_fields:
+                    sink = "%s.%s" % (_sink_object(node), fname)
+                    if sink not in ALLOWED_IDENTITY_SINKS:
+                        out.append(Violation(
+                            rel, node.lineno, "V4_IDENTITY_IN_PROTECTED_SINK",
+                            "Ausgabekanal %s erhaelt Identitaetsfelder %s "
+                            "— die Ausnahme gilt nur fuer die "
+                            "Spieler-Analyseansicht" % (sink,
+                                                       ", ".join(identity_fields)),
+                            _snip(src, node), severity="ERROR"))
                 guard.check_text_expr(arg, src, rel, node.lineno,
                                       "ausgabe@%s()" % fname, out, scope,
                                       local_types)
 
     return out
+
+
+def _sink_object(node):
+    """Name des Objekts vor dem Sinkaruf — z. B. ``self.player_view``.
+
+    Fuer ``self.player_view.setPlainText(...)`` ist der Kontext
+    ``self.player_view``. Ohne Objekt (z. B. ``print(...)``) ist er ``""``.
+    """
+    func = getattr(node, "func", None)
+    if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Attribute):
+        return ast.unparse(func.value)
+    if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
+        return ast.unparse(func.value)
+    return ""
 
 
 def _resolve_output_source(node, scope):
@@ -1165,6 +1321,111 @@ def _resolve_output_source(node, scope):
                         return n.value
                     return None
     return None
+
+
+# ------------------------------------------------------------- O-7
+#: O-7: **Sensitivitaetspruefung** fuer Ausgabekanaele.
+#:
+#: Der Guard prueft bisher die *Herkunft* eines Textes (kontrolliert /
+#: unkontrolliert). Die O-7-Erweiterung fragt zusaetzlich: **welches
+#: konkrete Feld** fliesst in den Kanal?
+#:
+#: Voraussetzung ist eine **belegte** Aufloesung:
+#:
+#:   1. Das Argument des Ausgabekanals ist (transitiv) ein Aufruf eines
+#:      Formatters aus :data:`ANALYSIS_VIEW_FORMATTERS`.
+#:   2. Dieser Formatter liest genau die Felder aus
+#:      :data:`ANALYSIS_VIEW_FIELDS` (statische Literale in der Quelle).
+#:   3. Die Schnittmenge mit den ``IDENTITY``-Feldern entscheidet.
+#:
+#: Ist der Formatter **nicht** in :data:`ANALYSIS_VIEW_FORMATTERS`, wird
+#: **nichts** freigegeben — der Datenfluss bleibt unaufgeloest und der
+#: bisherige Herkunftsbefund gilt unveraendert. Es gibt also **keine**
+#: globale Ausnahme fuer Formatter-Ergebnisse.
+#:
+#: Ist der Formatter bekannt und liest er **keine** Identitaetsfelder,
+#: ist der Kanal frei. Liest er Identitaetsfelder, ist der Kanal
+#: **geschlossen**, ausser er ist die ausdruecklich erlaubte
+#: Spieler-Analyseansicht.
+#:
+#: Die Erlaubnis ist an den **konkreten Analysepfad** gebunden, nicht an
+#: den Formatter-Output: ein Aufruf von ``player_view_text()`` in einem
+#: Diagnosekanal bleibt ein Verstoß.
+
+#: O-7: Erlaubte Senke fuer die vollstaendige Spieler-Analyseansicht.
+#:
+#: Nur diese beiden Attribute der GUI-Spielerkarte duerfen Identitaet
+#: anzeigen. Alles andere (Diagnose, Status, Export, Log, Report) bleibt
+#: geschuetzt.
+ALLOWED_IDENTITY_SINKS = frozenset({
+    # ssb_ui/pages/savegame_page.py — die Spielerkarte
+    "self.player_view.setPlainText",
+    "player_view.setPlainText",
+})
+
+
+def _analysis_chain_fields(node, scope, local_types, depth=0,
+                           methods=None):
+    """Felder, die ein Ausgabeargument (transitiv) liest — oder ``None``.
+
+    Loest nur die **belegte** Kette auf: der Aufruf muss ein Formatter
+    aus :data:`ANALYSIS_VIEW_FORMATTERS` sein. Alles andere liefert
+    ``None`` — dann bleibt der Datenfluss unaufgeloest und der Guard
+    verhaelt sich wie bisher.
+
+    ``depth`` begrenzt die Rekursion gegen Zyklen.
+    ``methods`` ist die Methoden-Tabelle des Moduls
+    (Methode -> Rumpf), damit eine **Zwischenmethode** aufgeloest wird
+    (``self._format_player(header)`` -> ``player_view_text(...)``).
+    """
+    if depth > 6 or node is None:
+        return None
+    # Ein Aufruf des Analyse-Formatters: die gelesenen Felder sind belegt.
+    if isinstance(node, ast.Call):
+        fname = _name_of(node.func)
+        if fname in ANALYSIS_VIEW_FORMATTERS:
+            return set(ANALYSIS_VIEW_FIELDS)
+        # O-7: Eine Zwischenmethode (z. B. ``self._format_player(header)``)
+        # aufloesen: ihr Rumpf wird verfolgt. Findet sich darin der
+        # Analyse-Formatter, sind die Felder belegt.
+        if methods:
+            for candidate, body in methods.items():
+                if fname != candidate:
+                    continue
+                for stmt in ast.walk(body):
+                    if isinstance(stmt, ast.Return):
+                        found = _analysis_chain_fields(
+                            stmt.value, scope, local_types, depth + 1, methods)
+                        if found is not None:
+                            return found
+        # Ein Aufruf, der zurueckgibt: dessen Felder weitersuchen.
+        return _analysis_chain_fields(node.func, scope, local_types, depth + 1,
+                                      methods)
+    # Ein Name: die Zuweisung im Scope aufloesen.
+    if isinstance(node, ast.Name) and scope is not None:
+        for n in ast.walk(scope):
+            if isinstance(n, ast.Assign):
+                for tgt in n.targets:
+                    if isinstance(tgt, ast.Name) and tgt.id == node.id:
+                        return _analysis_chain_fields(n.value, scope,
+                                                      local_types, depth + 1,
+                                                      methods)
+    return None
+
+
+def _identity_fields_in_chain(node, scope, local_types, methods=None):
+    """Die Identitaetsfelder, die ein Ausgabeargument liest.
+
+    Liefert ``None``, wenn der Datenfluss **nicht aufgeloest** werden
+    kann (Herkunft unklar) — dann darf der Guard nichts behaupten.
+    Liefert eine (leere) Liste, wenn der Datenfluss aufgeloest ist und
+    keine Identitaet fliesst.
+    """
+    fields = _analysis_chain_fields(node, scope, local_types, methods=methods)
+    if fields is None:
+        return None
+    return sorted(f for f in fields
+                  if sensitivity_of(f) == SENSITIVITY_IDENTITY)
 
 
 def _resolve_dict_literal(node, scope):
@@ -1360,7 +1621,12 @@ def selftest(env: TypeEnv) -> int:
         print(f"  {mark} {r['case']:26s} erwartet={r['expect']:10s} "
               f"verletzungen={r['violations']}")
     print(f"\nFAILS: {failures}/{len(rows)}")
-    Path("/tmp/ssbi_r1_4/guard_selftest_v2.json").write_text(
+    # O-7: Das Zielverzeichnis kann fehlen (z. B. nach einem Sandbox-Reset
+    # von /tmp). Ohne dieses Anlegen bricht der Selbsttest mit einem
+    # FileNotFoundError ab, statt sein Ergebnis zu liefern.
+    _selftest_report = Path("/tmp/ssbi_r1_4/guard_selftest_v2.json")
+    _selftest_report.parent.mkdir(parents=True, exist_ok=True)
+    _selftest_report.write_text(
         json.dumps(rows, indent=2, ensure_ascii=False), encoding="utf-8")
     return 1 if failures else 0
 
@@ -1399,7 +1665,10 @@ def scan(target: Path) -> int:
     for v in errs:
         print(f"  {v.file}:{v.line}  [{v.rule}] {v.detail}")
         print(f"      {v.snippet[:150]}")
-    Path("/tmp/ssbi_r1_4/guard_scan_v2.json").write_text(
+    # O-7: siehe oben — das Zielverzeichnis kann fehlen.
+    _scan_report = Path("/tmp/ssbi_r1_4/guard_scan_v2.json")
+    _scan_report.parent.mkdir(parents=True, exist_ok=True)
+    _scan_report.write_text(
         json.dumps([v.as_dict() for v in allv], indent=2, ensure_ascii=False),
         encoding="utf-8")
     return 0

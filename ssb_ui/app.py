@@ -59,18 +59,44 @@ APP_SUBTITLE = _PRODUCT_SUBTITLE
 
 
 # =============================================================================
-# Theme constants — cyberpunk accent colors
+# Theme constants
+#
+# Die Palette liegt zentral in ``ssb_ui.theme``. Hier stehen nur noch die
+# Aliase, weil mehrere Stellen in dieser Datei die kurzen Namen benutzen.
+# Vorher pflegte jede Seite eine eigene Kopie der Farbwerte — daraus
+# entstanden driftende Nuancen und eine uneinheitliche Oberflaeche.
 # =============================================================================
-ACCENT_CYAN   = "#00E5FF"
-ACCENT_PINK   = "#FF1F8F"
-ACCENT_AMBER  = "#FFB300"
-ACCENT_GREEN  = "#39FF14"
-ACCENT_PURPLE = "#B026FF"
-DARK_BG       = "#0A0E14"
-PANEL_BG      = "#131822"
-GRID_LINE     = "#1F2937"
-TEXT_MAIN     = "#E8F0FF"
-TEXT_DIM      = "#7E8AA0"
+from ssb_ui.theme import (
+
+    ACCENT,
+    CARD,
+    CARD_EDGE,
+    FIELD,
+    MONO_FAMILY_CSS,
+    ON_ACCENT,
+    ROW_ALT,
+    STATUS_FAIL,
+    STATUS_INFO,
+    STATUS_OK,
+    STATUS_WARN,
+    SURFACE,
+    TEXT,
+    TEXT_DIM,
+    TEXT_FAINT,
+    body_font,
+    mono_font,
+    status_color,
+)
+
+ACCENT_CYAN   = ACCENT
+ACCENT_PINK   = STATUS_FAIL
+ACCENT_AMBER  = STATUS_WARN
+ACCENT_GREEN  = STATUS_OK
+ACCENT_PURPLE = ACCENT
+DARK_BG       = SURFACE
+PANEL_BG      = CARD
+GRID_LINE     = CARD_EDGE
+TEXT_MAIN     = TEXT
 
 
 # =============================================================================
@@ -88,7 +114,7 @@ PAGE_LOG      = 5
 # Sidebar widget — left navigation
 # =============================================================================
 class Sidebar(QListWidget):
-    """Cyberpunk-themed sidebar with icon-style entries.
+    """Sidebar mit neutralen Eintraegen und einem Akzent fuer die Auswahl.
 
     Die Eintraege kommen von aussen als Liste ``(Label, page_id)``, damit
     Sidebar-Reihenfolge und StackedWidget-Index aus EINER Quelle stammen.
@@ -112,7 +138,7 @@ class Sidebar(QListWidget):
                 color: {TEXT_MAIN};
                 border: none;
                 border-right: 1px solid {GRID_LINE};
-                font-family: "Cascadia Code", "Consolas", monospace;
+                font-family: {MONO_FAMILY_CSS};
                 font-size: 11pt;
                 padding: 6px 0;
             }}
@@ -121,19 +147,19 @@ class Sidebar(QListWidget):
                 border-left: 3px solid transparent;
             }}
             QListWidget::item:hover {{
-                background-color: #1a212e;
-                color: {ACCENT_CYAN};
+                background-color: {ROW_ALT};
+                color: {TEXT};
             }}
             QListWidget::item:selected {{
-                background-color: #1a212e;
-                color: {ACCENT_CYAN};
-                border-left: 3px solid {ACCENT_CYAN};
+                background-color: {ROW_ALT};
+                color: {TEXT};
+                border-left: 3px solid {ACCENT};
             }}
         """)
 
 
 # =============================================================================
-# Header banner — cyberpunk brand bar
+# Header banner — Kopfleiste mit Akzent
 # =============================================================================
 class HeaderBanner(QFrame):
     def __init__(self, parent=None):
@@ -141,29 +167,24 @@ class HeaderBanner(QFrame):
         self.setFixedHeight(60)
         self.setStyleSheet(f"""
             QFrame {{
-                background: qlineargradient(
-                    x1: 0, y1: 0, x2: 1, y2: 0,
-                    stop: 0 {DARK_BG},
-                    stop: 0.4 {PANEL_BG},
-                    stop: 1 {DARK_BG}
-                );
-                border-bottom: 1px solid {ACCENT_CYAN};
+                background-color: {CARD};
+                border-bottom: 1px solid {CARD_EDGE};
             }}
             QLabel#title {{
                 color: {ACCENT_CYAN};
-                font-family: "Cascadia Code", "Consolas", monospace;
+                font-family: {MONO_FAMILY_CSS};
                 font-size: 18pt;
                 font-weight: bold;
                 letter-spacing: 2px;
             }}
             QLabel#subtitle {{
                 color: {TEXT_DIM};
-                font-family: "Cascadia Code", "Consolas", monospace;
+                font-family: {MONO_FAMILY_CSS};
                 font-size: 9pt;
             }}
             QLabel#accent {{
-                color: {ACCENT_PINK};
-                font-family: "Cascadia Code", "Consolas", monospace;
+                color: {TEXT_FAINT};
+                font-family: {MONO_FAMILY_CSS};
                 font-size: 14pt;
             }}
         """)
@@ -179,7 +200,7 @@ class HeaderBanner(QFrame):
         subtitle.setObjectName("subtitle")
         layout.addWidget(subtitle, stretch=1)
         version = QLabel(f"v{PRODUCT_VERSION}")
-        version.setStyleSheet(f"color: {ACCENT_AMBER}; font-family: 'Cascadia Code'; font-size: 10pt;")
+        version.setStyleSheet(f"color: {TEXT_DIM}; font-family: {MONO_FAMILY_CSS}; font-size: 10pt;")
         layout.addWidget(version)
 
 
@@ -244,15 +265,15 @@ class LogPage(QTextEdit):
                 background-color: {DARK_BG};
                 color: {TEXT_MAIN};
                 border: none;
-                font-family: "Cascadia Code", "Consolas", monospace;
+                font-family: {MONO_FAMILY_CSS};
                 font-size: 10pt;
                 padding: 12px;
             }}
         """)
-        self.append(f'<span style="color:{ACCENT_CYAN}">▶ {APP_NAME} {PRODUCT_VERSION} — UI loaded</span>')
-        self.append(f'<span style="color:{TEXT_DIM}">  Cyberpunk theme active · qdarkstyle + custom QSS</span>')
+        self.append(f'<span style="color:{TEXT}">▶ {APP_NAME} {PRODUCT_VERSION} — UI loaded</span>')
+        self.append(f'<span style="color:{TEXT_DIM}">  Dark theme active · neutral palette, one accent colour</span>')
         self.append(f'<span style="color:{TEXT_DIM}">  Read-only by default · capability map respected</span>')
-        self.append(f'<span style="color:{ACCENT_AMBER}">  Available tools: Savegame Analyzer, Hex Viewer</span>')
+        self.append(f'<span style="color:{TEXT_DIM}">  Available tools: Savegame Analyzer, Hex Viewer</span>')
         self.append(f'<span style="color:{TEXT_DIM}">  {_PRODUCT_NAME} · {_DEVELOPER} · command line: {CLI_PROG} --help</span>')
 
 
@@ -315,7 +336,7 @@ class SSBWorkbench(QMainWindow):
                 background-color: {PANEL_BG};
                 color: {TEXT_MAIN};
                 border-top: 1px solid {GRID_LINE};
-                font-family: "Cascadia Code", monospace;
+                font-family: {MONO_FAMILY_CSS};
             }}
         """)
         self.setStatusBar(self.statusbar)
@@ -463,7 +484,7 @@ def main() -> int:
 
     app = QApplication(sys.argv)
 
-    # Apply cyberpunk theme (qdarkstyle_pyside6 / palette)
+    # Basis-Theme (qdarkstyle_pyside6) + eigene Akzente
     qss = qdarkstyle.load_stylesheet_pyside6()
     app.setStyleSheet(qss + f"""
         QMainWindow {{

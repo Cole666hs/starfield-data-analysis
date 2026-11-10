@@ -1,9 +1,27 @@
 # Changelog — Starfield Data Analysis
 
-## Unreleased
+## 1.6.0 — 2026-11-09
 
-The Savegame Analyzer's player card now shows every header field the save
-actually contains. Read-only as before.
+Player card completed, guard made field-aware, column width measured against
+the real font. Read-only throughout: no save is written, repaired or
+recompressed.
+
+**Added**
+
+- The Privacy Guard now resolves **which header field** a text actually
+  carries. Every field is explicitly classified as identity, public or
+  unknown; a field that is not declared stays unknown and is never released
+  automatically. A new rule, `V4_IDENTITY_IN_PROTECTED_SINK`, reports an
+  error when identity fields reach a diagnostic, status, export or error
+  channel. The exception is granted to one concrete path — the player card —
+  and not to a formatter as such. The resolution follows intermediate
+  methods, so the guard sees the real chain in the application code.
+  The guard is a static check; it is not a proof of runtime behaviour.
+- Non-finite numbers are marked as such. `NaN`, `+inf` and `-inf` used to be
+  formatted as ordinary numbers (`nan`, `inf`). They now show as
+  `(nicht endlich) (NaN)` and the kind is named. Missing, empty, unassigned
+  and non-finite values remain four distinguishable states. The decoded
+  values themselves are untouched.
 
 **Changed**
 
@@ -20,6 +38,19 @@ actually contains. Read-only as before.
 - Values the save does not provide are marked as missing, empty or
   unassigned. No placeholder stands in for a measurement, and a code without
   a documented meaning (the gender field) is labelled as such.
+- The two-column layout now measures its width with the font that is
+  actually used (`QFontMetrics.horizontalAdvance`) instead of counting
+  characters. A character that occupies two columns no longer shifts the
+  right-hand column. On the test save the right column stays at the same
+  pixel position for ASCII, CJK and emoji content.
+- The stylesheets no longer name a single font family. A list of fallbacks
+  ends in `monospace`. With the single name, Qt fell back to a proportional
+  font on a system without that family, which shifted the columns by 77
+  pixels on the widest row.
+- The version is defined in one place only. `ssb_i.__version__` and
+  `ssb_ui.__version__` are derived from `ssb_i.product.VERSION` now, so the
+  package, the command line and the window title cannot report different
+  versions.
 
 **Fixed**
 
@@ -36,6 +67,14 @@ actually contains. Read-only as before.
   through `public_header_view()`. `tests/test_ssb_i_player_view.py` checks
   both sides on the same header: the identity markers appear in the card and
   in none of the diagnostic channels.
+
+**Interface**
+
+- The user interface was unified: one accent colour instead of several
+  decorative ones, semantic colours for the integrity status only, and
+  neutral panels. The integrity view marks PASS, WARNING, FAILED, UNKNOWN
+  and NOT_CHECKED differently. The theme still builds on qdarkstyle as a
+  base; that base was not replaced.
 
 ## 1.5.3 — 2026-11-08
 
@@ -78,9 +117,9 @@ save is written, repaired or recompressed.
 
 **Docs**
 
-- `SAVE_INTELLIGENCE_AUDIT.md`, `SAVE_INTELLIGENCE_SPEC.md`,
-  `EXTERNAL_SAVEGAME_TOOLING_AUDIT.md` and
-  `SAVE_FORMAT_AND_INTEGRITY_IMPLEMENTATION_REPORT.md`.
+- `docs/reports/SAVE_INTELLIGENCE_AUDIT.md`, `docs/reports/SAVE_INTELLIGENCE_SPEC.md`,
+  `docs/reports/EXTERNAL_SAVEGAME_TOOLING_AUDIT.md` and
+  `docs/reports/SAVE_FORMAT_AND_INTEGRITY_IMPLEMENTATION_REPORT.md`.
 
 ## 1.0.0 — 2026-11-05
 

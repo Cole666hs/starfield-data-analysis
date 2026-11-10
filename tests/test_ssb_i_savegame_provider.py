@@ -10,7 +10,7 @@ FIXTURE-GESCHICHTE
   Jetzt laufen sie gegen die real vorhandenen Spielstaende unter ``SAVE_PROBES``
   (Default ``~/ssb_probes``) und sind Pflicht: fehlt die Datenbasis, schlagen sie
   fehl. Die alten Save-Versionen 104/122 sind als eigene Luecke dokumentiert
-  (``SAVE_FORMAT_AND_INTEGRITY_IMPLEMENTATION_REPORT.md``) — fuer sie liegt
+  (``docs/reports/SAVE_FORMAT_AND_INTEGRITY_IMPLEMENTATION_REPORT.md``) — fuer sie liegt
   kein Artefakt mehr vor.
 """
 from __future__ import annotations

@@ -1,6 +1,6 @@
 # Installation — Starfield Data Analysis
 
-Version 1.0.0 · Entropy Development
+Version 1.6.0 · Entropy Development
 
 The package is a folder. There is nothing to install, no registry entry, no
 service and no background process.
@@ -22,7 +22,7 @@ to each other. Copy only the whole folder.
 ## Linux
 
 ```
-unzip Starfield-Data-Analysis-1.0.0-linux-x86_64.zip -d StarfieldDataAnalysis
+unzip Starfield-Data-Analysis-1.6.0-linux-x86_64.zip -d StarfieldDataAnalysis
 cd StarfieldDataAnalysis/StarfieldDataAnalysis
 ./StarfieldDataAnalysis          # GUI (needs a graphical session)
 ./sfda --help                    # CLI
