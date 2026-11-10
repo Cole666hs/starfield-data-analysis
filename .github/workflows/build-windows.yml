@@ -140,10 +140,20 @@ jobs:
             $zip.Dispose()
           }
 
+      # Bei einem push-Trigger ist "inputs" leer. Deshalb wird dort immer
+      # hochgeladen, bei workflow_dispatch entscheidet der Schalter.
       - name: Artefakt hochladen
-        if: ${{ inputs.upload_artifact != false }}
+        if: ${{ github.event_name == 'push' || inputs.upload_artifact }}
         uses: actions/upload-artifact@v4
         with:
           name: Starfield-Data-Analysis-windows-x64
           path: dist/
+          retention-days: 30
+
+      - name: ZIP hochladen
+        if: ${{ github.event_name == 'push' || inputs.upload_artifact }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: Starfield-Data-Analysis-windows-x64-zip
+          path: dist/Starfield-Data-Analysis-windows-x86_64.zip
           retention-days: 30
