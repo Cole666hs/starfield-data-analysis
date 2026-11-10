@@ -1,5 +1,31 @@
 # Changelog — Starfield Data Analysis
 
+## 1.6.1 — 2026-11-10
+
+Packaging only. The release packages are now single-file executables, so a
+download no longer contains an archive inside another archive.
+
+**Changed**
+
+- The packaging specification builds self-contained executables instead of a
+  directory tree with an `_internal/` folder. A directory build always writes
+  the Python standard library to `_internal/base_library.zip`, which is an
+  archive inside the download archive; Nexus Mods rejects uploads of that
+  shape. The single-file build appends the same bytecode to the executable
+  itself, so the finished download contains no nested archive. The old layout
+  is still available for local debugging with `SFDA_BUILD_MODE=onedir`.
+- `BUILD.md` describes both layouts and the reason for the default.
+
+**Added**
+
+- A GitHub workflow `.github/workflows/build-windows.yml` builds the Windows
+  package on `windows-latest`, runs the version and page checks, writes the
+  `SHA256SUMS` file and uploads the result as a workflow artifact.
+
+The behaviour of the tool is unchanged: the command line output of the
+directory build and of the single-file build is identical, byte for byte,
+including the exit codes.
+
 ## 1.6.0 — 2026-11-09
 
 Player card completed, guard made field-aware, column width measured against

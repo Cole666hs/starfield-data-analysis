@@ -24,7 +24,7 @@ DEVELOPER = "Entropy Development"
 #: The PyInstaller spec, the CLI (``--version``), the GUI window title and
 #: the documentation all derive from it. ``ssb_i.__version__`` is
 #: re-exported from here instead of carrying a second, drifting literal.
-VERSION = "1.6.0"
+VERSION = "1.6.1"
 
 #: Executable / archive base name (no spaces: safe for shells and archives)
 SLUG = "StarfieldDataAnalysis"

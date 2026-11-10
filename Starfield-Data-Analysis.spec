@@ -1,10 +1,25 @@
 # -*- mode: python ; coding: utf-8 -*-
 """PyInstaller spec — Starfield Data Analysis (Entropy Development).
 
-Builds two programs into one folder:
+Builds two programs:
 
     StarfieldDataAnalysis    graphical interface (no console window)
     sfda                     command line (console)
+
+Two layouts are available and both are supported by the release process:
+
+``onefile`` (default)
+    Two self-contained executables, no directory tree. The Python standard
+    library archive is inside the executable, so the finished download
+    contains no archive-inside-an-archive. Nexus Mods rejects uploads that
+    nest one archive inside another, and the previous onedir layout shipped
+    ``_internal/base_library.zip`` inside the ZIP, which is exactly that
+    pattern. Onefile removes it.
+
+``onedir``
+    The classic directory layout with ``_internal/``. Useful for local
+    debugging because the files stay readable on disk. Set
+    ``SFDA_BUILD_MODE=onedir`` to get it.
 
 Everything is derived from SPECPATH, so the build works from any directory and
 on any machine. The AISC 3D preview is not part of this product and is excluded
@@ -14,6 +29,7 @@ Usage:
     pyinstaller Starfield-Data-Analysis.spec --noconfirm
 """
 import os
+import sys
 from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_all
@@ -21,9 +37,15 @@ from PyInstaller.utils.hooks import collect_all
 HERE = Path(SPECPATH).resolve()
 
 #: Release version and names come from the single identity module.
-import sys
 sys.path.insert(0, str(HERE))
-from ssb_i.product import SLUG, VERSION  # noqa: E402
+from ssb_i.product import SLUG  # noqa: E402
+
+#: "onefile" or "onedir". Onefile is what the published downloads use.
+MODE = os.environ.get("SFDA_BUILD_MODE", "onefile").strip().lower()
+if MODE not in ("onefile", "onedir"):
+    raise SystemExit(
+        "SFDA_BUILD_MODE must be 'onefile' or 'onedir', got %r" % MODE
+    )
 
 FOLDER = os.environ.get("SFDA_BUILD_NAME", SLUG)
 GUI_NAME = SLUG
@@ -93,15 +115,6 @@ gui = Analysis(
     noarchive=False, optimize=0,
 )
 gui_pyz = PYZ(gui.pure)
-gui_exe = EXE(
-    gui_pyz, gui.scripts, [],
-    exclude_binaries=True,
-    name=GUI_NAME,
-    debug=False, bootloader_ignore_signals=False,
-    strip=False, upx=False, console=False,
-    disable_windowed_traceback=False, argv_emulation=False,
-    target_arch=None, codesign_identity=None, entitlements_file=None,
-)
 
 # --- command line ----------------------------------------------------------
 cli = Analysis(
@@ -114,19 +127,49 @@ cli = Analysis(
     noarchive=False, optimize=0,
 )
 cli_pyz = PYZ(cli.pure)
-cli_exe = EXE(
-    cli_pyz, cli.scripts, [],
-    exclude_binaries=True,
-    name=CLI_NAME,
-    debug=False, bootloader_ignore_signals=False,
-    strip=False, upx=False, console=True,
-    disable_windowed_traceback=False, argv_emulation=False,
-    target_arch=None, codesign_identity=None, entitlements_file=None,
-)
 
-coll = COLLECT(
-    gui_exe, gui.binaries, gui.datas,
-    cli_exe, cli.binaries, cli.datas,
-    strip=False, upx=False, upx_exclude=[],
-    name=FOLDER,
-)
+if MODE == "onefile":
+    # One executable per program. The bytecode archive is appended to the
+    # executable itself, so the download is a plain file with no nested
+    # archive inside it.
+    gui_exe = EXE(
+        gui_pyz, gui.scripts, gui.binaries, gui.datas, [],
+        name=GUI_NAME,
+        debug=False, bootloader_ignore_signals=False,
+        strip=False, upx=False, console=False,
+        disable_windowed_traceback=False, argv_emulation=False,
+        target_arch=None, codesign_identity=None, entitlements_file=None,
+    )
+    cli_exe = EXE(
+        cli_pyz, cli.scripts, cli.binaries, cli.datas, [],
+        name=CLI_NAME,
+        debug=False, bootloader_ignore_signals=False,
+        strip=False, upx=False, console=True,
+        disable_windowed_traceback=False, argv_emulation=False,
+        target_arch=None, codesign_identity=None, entitlements_file=None,
+    )
+else:
+    gui_exe = EXE(
+        gui_pyz, gui.scripts, [],
+        exclude_binaries=True,
+        name=GUI_NAME,
+        debug=False, bootloader_ignore_signals=False,
+        strip=False, upx=False, console=False,
+        disable_windowed_traceback=False, argv_emulation=False,
+        target_arch=None, codesign_identity=None, entitlements_file=None,
+    )
+    cli_exe = EXE(
+        cli_pyz, cli.scripts, [],
+        exclude_binaries=True,
+        name=CLI_NAME,
+        debug=False, bootloader_ignore_signals=False,
+        strip=False, upx=False, console=True,
+        disable_windowed_traceback=False, argv_emulation=False,
+        target_arch=None, codesign_identity=None, entitlements_file=None,
+    )
+    coll = COLLECT(
+        gui_exe, gui.binaries, gui.datas,
+        cli_exe, cli.binaries, cli.datas,
+        strip=False, upx=False, upx_exclude=[],
+        name=FOLDER,
+    )

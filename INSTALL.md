@@ -1,6 +1,6 @@
 # Installation — Starfield Data Analysis
 
-Version 1.6.0 · Entropy Development
+Version 1.6.1 · Entropy Development
 
 The package is a folder. There is nothing to install, no registry entry, no
 service and no background process.
@@ -16,14 +16,16 @@ Windows SmartScreen may warn that the program is not commonly downloaded. That
 is expected for a new, unsigned build: choose *More info* → *Run anyway*. The
 package is not code-signed.
 
-Keep the folder together: the two `.exe` files and the `_internal` folder belong
-to each other. Copy only the whole folder.
+The two programs are self-contained: each `.exe` carries its own Python
+runtime and the Qt libraries. You can copy either one on its own. The
+readme, the licence and the `SHA256SUMS` file belong next to them and are not
+needed to run the program.
 
 ## Linux
 
 ```
-unzip Starfield-Data-Analysis-1.6.0-linux-x86_64.zip -d StarfieldDataAnalysis
-cd StarfieldDataAnalysis/StarfieldDataAnalysis
+unzip Starfield-Data-Analysis-1.6.1-linux-x86_64.zip -d StarfieldDataAnalysis
+cd StarfieldDataAnalysis
 ./StarfieldDataAnalysis          # GUI (needs a graphical session)
 ./sfda --help                    # CLI
 ```
